@@ -9,3 +9,9 @@ htmlcov/
 .venv*/
 pytest*.log
 collect*.log
+.venv/
+venv/
+node_modules/
+.benchmarks/
+.env
+dist/
