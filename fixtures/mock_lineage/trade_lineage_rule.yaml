@@ -1,0 +1,52 @@
+version: "1.0"
+name: trade_lineage_rule
+description: 交易域跨格式血缘规则，覆盖 csv、parquet 与 sqlite 关联。
+
+relations:
+  - name: trade_owner
+    description: 每条交易必须引用已存在的用户
+    left:
+      table: trades
+      field: user_id
+    right:
+      table: users
+      field: user_id
+    relationship: many_to_one
+    require_reference: true
+    allow_null: false
+
+  - name: trade_product
+    description: 每条交易必须引用已存在的商品
+    left:
+      table: trades
+      field: product_id
+    right:
+      table: products
+      field: product_id
+    relationship: many_to_one
+    require_reference: true
+    allow_null: false
+
+  - name: trade_order
+    description: 交易与订单为一一对应
+    left:
+      table: orders
+      field: trade_id
+    right:
+      table: trades
+      field: trade_id
+    relationship: one_to_one
+    require_reference: true
+    allow_null: false
+
+  - name: order_product
+    description: 订单必须引用已存在的商品（sqlite 与 parquet 跨格式）
+    left:
+      table: orders
+      field: product_id
+    right:
+      table: products
+      field: product_id
+    relationship: many_to_one
+    require_reference: true
+    allow_null: false

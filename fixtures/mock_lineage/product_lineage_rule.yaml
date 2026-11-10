@@ -1,0 +1,28 @@
+version: "1.0"
+name: product_lineage_rule
+description: 商品域血缘规则，校验订单对商品与交易的引用。
+
+relations:
+  - name: order_product
+    description: 订单必须引用已存在的商品
+    left:
+      table: orders
+      field: product_id
+    right:
+      table: products
+      field: product_id
+    relationship: many_to_one
+    require_reference: true
+    allow_null: false
+
+  - name: order_trade
+    description: 订单与交易一一对应
+    left:
+      table: orders
+      field: trade_id
+    right:
+      table: trades
+      field: trade_id
+    relationship: one_to_one
+    require_reference: true
+    allow_null: false

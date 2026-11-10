@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}任务 {{ task.task_id }} · 数包闸检{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="eyebrow">TASK REPORT · {{ task.task_id }}</p>
+    <h1>校验结果详情</h1>
+    <p class="muted">{{ task.packet_name }} · {{ task.uploaded_at.replace('T', ' ') }}</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn" href="{{ url_for('task_list') }}">返回列表</a>
+    <form method="post" action="{{ url_for('delete_task', task_id=task.task_id) }}"
+          class="inline-form js-confirm" data-confirm="确认删除该任务及全部报告？">
+      <button class="btn danger-outline" type="submit">删除任务</button>
+    </form>
+  </div>
+</section>
+
+<section class="result-banner {{ 'ok' if report.overall_passed else 'bad' }}">
+  <div>
+    <span class="result-kicker">总体结论</span>
+    <strong>{{ '准入通过' if report.overall_passed else '准入不通过' }}</strong>
+    <p>{{ task.error_summary or '全部校验项均通过，未发现阻断性问题。' }}</p>
+  </div>
+  <div class="result-stats">
+    <div><strong>{{ report.pass_rate }}%</strong><span>校验项通过率</span></div>
+    <div><strong>{{ report.issues|length }}</strong><span>问题数</span></div>
+    <div><strong>{{ '%.2f'|format(task.duration_seconds or 0) }}s</strong><span>耗时</span></div>
+  </div>
+</section>
+
+<div class="detail-grid">
+  <section class="card">
+    <div class="card-head"><h2>任务档案</h2><span class="pill {{ 'pass' if task.passed else 'fail' }}">
+      {{ '通过' if task.passed else '不通过' }}</span></div>
+    <dl class="kv">
+      <dt>任务 ID</dt><dd class="mono">{{ task.task_id }}</dd>
+      <dt>数据包大小</dt><dd>{{ task.packet_size }} 字节</dd>
+      <dt>压缩格式</dt><dd>{{ task.archive_type or '-' }}</dd>
+      <dt>整包 SHA256</dt><dd class="break mono">{{ task.packet_sha256 or '-' }}</dd>
+      <dt>契约文件</dt><dd>{{ task.contract_name or '-' }}</dd>
+      <dt>血缘规则</dt><dd>{{ task.lineage_name or '-' }}</dd>
+      <dt>配置哈希</dt><dd class="mono">{{ task.config_hash }}</dd>
+      <dt>工具版本</dt><dd>v{{ task.tool_version }}</dd>
+      <dt>完成时间</dt><dd>{{ (task.finished_at or '-').replace('T', ' ') }}</dd>
+    </dl>
+    <div class="download-row">
+      <a class="btn" href="{{ url_for('download_report', task_id=task.task_id, fmt='html') }}">下载 HTML 报告</a>
+      <a class="btn ghost" href="{{ url_for('download_report', task_id=task.task_id, fmt='md') }}">Markdown</a>
+      <a class="btn ghost" href="{{ url_for('download_report', task_id=task.task_id, fmt='json') }}">JSON</a>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>校验项</h2><span class="muted">{{ report.passed_checks }}/{{ report.total_checks }} 通过</span></div>
+    <div class="check-list">
+      {% for check in report.checks %}
+      <div class="check-item">
+        <span class="dot {{ 'ok' if check.passed else 'bad' }}"></span>
+        <div>
+          <strong>{{ check.name }}</strong>
+          <p>{{ check.summary }}</p>
+        </div>
+        <span class="pill {{ 'pass' if check.passed else 'fail' }}">{{ '通过' if check.passed else '不通过' }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head"><h2>异常明细</h2><span class="muted">最多展示 100 条，完整内容见报告</span></div>
+  {% if report.issues %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>校验项</th><th>位置</th><th>代码</th><th>说明</th></tr></thead>
+      <tbody>
+      {% for issue in report.issues %}
+        <tr>
+          <td>{{ issue.check }}</td>
+          <td>{{ issue.path or (issue.table or '-') }}{% if issue.field %} / {{ issue.field }}{% endif %}{% if issue.row %} / 行 {{ issue.row }}{% endif %}</td>
+          <td class="mono">{{ issue.code or '-' }}</td>
+          <td>{{ issue.message }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state compact"><p>未发现异常明细。</p></div>
+  {% endif %}
+</section>
+
+<div class="detail-grid">
+  <section class="card">
+    <div class="card-head"><h2>错误样例</h2><span class="muted">值已截断</span></div>
+    {% if report.samples %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>表 / 字段</th><th>行号</th><th>值</th><th>说明</th></tr></thead>
+        <tbody>
+        {% for sample in report.samples %}
+          <tr>
+            <td>{{ sample.table or '-' }}{% if sample.field %} / {{ sample.field }}{% endif %}</td>
+            <td>{{ sample.row if sample.row is not none else '-' }}</td>
+            <td class="mono">{{ sample.value if sample.value is not none else '-' }}</td>
+            <td>{{ sample.message or sample.rule or '-' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty-state compact"><p>无错误样例。</p></div>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>修复建议</h2></div>
+    <ol class="suggestions">
+      {% for item in report.suggestions %}<li>{{ item }}</li>{% endfor %}
+    </ol>
+    {% if report.lineage_graph.broken_nodes %}
+      <p class="risk-note">断链节点：{{ report.lineage_graph.broken_nodes|join('、') }}</p>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head"><h2>血缘链路</h2><span class="muted">文本 + Mermaid 源码</span></div>
+  {% if report.lineage_graph.text %}
+    <pre class="code-block">{{ report.lineage_graph.text }}</pre>
+    <details class="advanced">
+      <summary>查看 Mermaid 源码</summary>
+      <pre class="code-block">{{ report.lineage_graph.mermaid }}</pre>
+    </details>
+  {% else %}
+    <div class="empty-state compact"><p>本次任务没有血缘关联配置。</p></div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <details class="advanced" {% if not task.passed %}open{% endif %}>
+    <summary>本地任务日志（末 120 行）</summary>
+    {% if log_preview %}
+      <pre class="code-block log-block">{{ log_preview }}</pre>
+    {% else %}
+      <p class="muted">日志文件不存在或不可读取。</p>
+    {% endif %}
+  </details>
+</section>
+{% endblock %}

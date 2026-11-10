@@ -1,0 +1,94 @@
+version: "1.0"
+name: product_contract
+description: 商品域契约样例，校验商品维表与订单事实表。
+allow_extra_fields: false
+
+tables:
+  products:
+    file: data/products.parquet
+    fields:
+      product_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^P[0-9]{3}$'
+      product_name:
+        type: string
+        required: true
+        nullable: false
+        maxLength: 60
+      category:
+        type: string
+        required: true
+        nullable: false
+        enum: [electronics, books, home, sports]
+      price:
+        type: number
+        required: true
+        nullable: false
+        minimum: 0
+      stock:
+        type: integer
+        required: true
+        nullable: false
+        minimum: 0
+      listed_date:
+        type: string
+        required: true
+        nullable: false
+        format: date
+  orders:
+    file: data/orders.sqlite
+    sqlite_table: orders
+    fields:
+      order_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^O[0-9]{4}$'
+      trade_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^T[0-9]{4}$'
+      product_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^P[0-9]{3}$'
+      amount:
+        type: number
+        required: true
+        nullable: false
+        minimum: 0
+      order_date:
+        type: string
+        required: true
+        nullable: false
+        format: date
+
+anomaly_rules:
+  products:
+    product_id:
+      - rule: duplicate_rate
+        max: 0.0
+    category:
+      - rule: regex
+        pattern: '^(electronics|books|home|sports)$'
+    price:
+      - rule: range
+        min: 0
+        max: 1000000
+    listed_date:
+      - rule: date
+        format: "%Y-%m-%d"
+  orders:
+    order_id:
+      - rule: duplicate_rate
+        max: 0.0
+    product_id:
+      - rule: null_rate
+        max: 0.0
+    order_date:
+      - rule: date
+        format: "%Y-%m-%d"

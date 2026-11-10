@@ -1,0 +1,231 @@
+version: "1.0"
+name: user_trade_contract
+description: 交易域离线数据包契约样例，覆盖用户、交易、商品与订单。
+allow_extra_fields: false
+
+tables:
+  users:
+    file: data/users.csv
+    allow_extra_fields: false
+    aliases:
+      user_name: [userName, name]
+      signup_date: [signupDate]
+    fields:
+      user_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^U[0-9]{4}$'
+        maxLength: 8
+      user_name:
+        type: string
+        required: true
+        nullable: false
+        maxLength: 40
+      region:
+        type: string
+        required: true
+        nullable: false
+        enum: [north, south, east, west]
+      age:
+        type: integer
+        required: true
+        nullable: false
+        minimum: 18
+        maximum: 100
+      email:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^[a-z0-9._]+@[a-z0-9.-]+\.local$'
+        maxLength: 80
+      signup_date:
+        type: string
+        required: true
+        nullable: false
+        format: date
+
+  trades:
+    file: data/trades.csv
+    fields:
+      trade_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^T[0-9]{4}$'
+        maxLength: 8
+      user_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^U[0-9]{4}$'
+      product_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^P[0-9]{3}$'
+      amount:
+        type: number
+        required: true
+        nullable: false
+        minimum: 0
+      quantity:
+        type: integer
+        required: true
+        nullable: false
+        minimum: 1
+        maximum: 100
+      status:
+        type: string
+        required: true
+        nullable: false
+        enum: [paid, pending, refunded]
+      trade_date:
+        type: string
+        required: true
+        nullable: false
+        format: date
+      note:
+        type: string
+        required: false
+        nullable: true
+        maxLength: 80
+
+  products:
+    file: data/products.parquet
+    fields:
+      product_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^P[0-9]{3}$'
+      product_name:
+        type: string
+        required: true
+        nullable: false
+        maxLength: 60
+      category:
+        type: string
+        required: true
+        nullable: false
+        enum: [electronics, books, home, sports]
+      price:
+        type: number
+        required: true
+        nullable: false
+        minimum: 0
+      stock:
+        type: integer
+        required: true
+        nullable: false
+        minimum: 0
+      listed_date:
+        type: string
+        required: true
+        nullable: false
+        format: date
+
+  orders:
+    file: data/orders.sqlite
+    sqlite_table: orders
+    fields:
+      order_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^O[0-9]{4}$'
+      trade_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^T[0-9]{4}$'
+      product_id:
+        type: string
+        required: true
+        nullable: false
+        pattern: '^P[0-9]{3}$'
+      amount:
+        type: number
+        required: true
+        nullable: false
+        minimum: 0
+      order_date:
+        type: string
+        required: true
+        nullable: false
+        format: date
+
+anomaly_rules:
+  users:
+    user_id:
+      - rule: null_rate
+        max: 0.0
+      - rule: duplicate_rate
+        max: 0.0
+    age:
+      - rule: range
+        min: 18
+        max: 100
+    region:
+      - rule: regex
+        pattern: '^(north|south|east|west)$'
+        full_match: true
+    email:
+      - rule: regex
+        pattern: '^[a-z0-9._]+@[a-z0-9.-]+\.local$'
+    signup_date:
+      - rule: date
+        format: "%Y-%m-%d"
+  trades:
+    trade_id:
+      - rule: duplicate_rate
+        max: 0.0
+    amount:
+      - rule: range
+        min: 0
+        max: 100000
+    quantity:
+      - rule: range
+        min: 1
+        max: 100
+    status:
+      - rule: regex
+        pattern: '^(paid|pending|refunded)$'
+    trade_date:
+      - rule: date
+        format: "%Y-%m-%d"
+    note:
+      - rule: null_rate
+        max: 0.2
+  products:
+    product_id:
+      - rule: duplicate_rate
+        max: 0.0
+    price:
+      - rule: range
+        min: 0
+        max: 1000000
+    stock:
+      - rule: range
+        min: 0
+        max: 100000
+    listed_date:
+      - rule: date
+        format: "%Y-%m-%d"
+  orders:
+    order_id:
+      - rule: duplicate_rate
+        max: 0.0
+    trade_id:
+      - rule: duplicate_rate
+        max: 0.0
+    product_id:
+      - rule: null_rate
+        max: 0.0
+    amount:
+      - rule: range
+        min: 0
+        max: 100000
+    order_date:
+      - rule: date
+        format: "%Y-%m-%d"

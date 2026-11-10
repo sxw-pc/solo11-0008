@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>数包闸检报告 - {{ report.task.task_id }}</title>
+  <style>
+    :root { --ink:#1f2933; --muted:#66707a; --line:#d9dee4; --ok:#1b7f4b;
+            --bad:#b42318; --warn:#9a6700; --bg:#f5f7f9; --card:#fff; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink);
+           font:14px/1.65 "Microsoft YaHei","PingFang SC",sans-serif; }
+    .page { max-width:1080px; margin:0 auto; padding:32px 24px 56px; }
+    header { border-left:5px solid #2f5d8a; padding:4px 0 4px 16px; margin-bottom:24px; }
+    h1 { margin:0 0 4px; font-size:26px; letter-spacing:1px; }
+    h2 { margin:28px 0 10px; font-size:18px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+    .sub { color:var(--muted); }
+    .badge { display:inline-block; padding:2px 10px; border-radius:12px; font-weight:600; }
+    .ok { color:var(--ok); background:#e7f5ed; }
+    .bad { color:var(--bad); background:#fdecea; }
+    .meta, .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; }
+    .meta div, .stat { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
+    .stat strong { display:block; font-size:22px; }
+    table { width:100%; border-collapse:collapse; background:var(--card); }
+    th, td { border:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+    th { background:#eef2f5; font-weight:600; }
+    .pass { color:var(--ok); font-weight:600; }
+    .fail { color:var(--bad); font-weight:600; }
+    pre { margin:0; padding:12px; background:#101820; color:#e8edf2; border-radius:6px;
+          overflow-x:auto; white-space:pre-wrap; word-break:break-word; }
+    .muted { color:var(--muted); }
+    .empty { padding:16px; background:var(--card); border:1px dashed var(--line); color:var(--muted); }
+    footer { margin-top:36px; padding-top:12px; border-top:1px solid var(--line);
+             color:var(--muted); font-size:12px; }
+    @media print { body { background:#fff; } .page { max-width:none; padding:0; } }
+  </style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>数包闸检 · 数据包准入校验报告</h1>
+    <div class="sub">离线校验 / 任务 {{ report.task.task_id }} / 生成于 {{ report.meta.generated_at }}</div>
+  </header>
+
+  <section class="grid">
+    <div class="stat"><span class="muted">总体结论</span>
+      {% if report.overall_passed %}<strong class="pass">通过</strong>{% else %}<strong class="fail">不通过</strong>{% endif %}
+    </div>
+    <div class="stat"><span class="muted">校验项通过率</span><strong>{{ report.pass_rate }}%</strong></div>
+    <div class="stat"><span class="muted">问题数量</span><strong>{{ report.issues|length }}</strong></div>
+    <div class="stat"><span class="muted">工具版本</span><strong>{{ report.meta.tool_version }}</strong></div>
+  </section>
+
+  <h2>任务信息</h2>
+  <div class="meta">
+    <div><span class="muted">数据包</span><br>{{ report.task.packet_name }}</div>
+    <div><span class="muted">包大小</span><br>{{ report.task.packet_size }} 字节</div>
+    <div><span class="muted">压缩格式</span><br>{{ report.task.archive_type or '-' }}</div>
+    <div><span class="muted">上传时间</span><br>{{ report.task.uploaded_at }}</div>
+    <div><span class="muted">耗时</span><br>{{ '%.2f'|format(report.task.duration_seconds or 0) }} 秒</div>
+    <div><span class="muted">配置哈希</span><br>{{ report.meta.config_hash }}</div>
+    <div><span class="muted">契约</span><br>{{ report.task.contract_name or '-' }}</div>
+    <div><span class="muted">血缘规则</span><br>{{ report.task.lineage_name or '-' }}</div>
+  </div>
+
+  <h2>校验项概览</h2>
+  <table>
+    <thead><tr><th>校验项</th><th>结果</th><th>错误数</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for check in report.checks %}
+      <tr>
+        <td>{{ check.name }}</td>
+        <td class="{{ 'pass' if check.passed else 'fail' }}">{{ '通过' if check.passed else '不通过' }}</td>
+        <td>{{ check.error_count }}</td>
+        <td>{{ check.summary }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>异常明细</h2>
+  {% if report.issues %}
+  <table>
+    <thead><tr><th>校验项</th><th>位置</th><th>代码</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for issue in report.issues %}
+      <tr>
+        <td>{{ issue.check }}</td>
+        <td>{{ issue.path or (issue.table or '-') }}{% if issue.field %} / {{ issue.field }}{% endif %}{% if issue.row %} / 行 {{ issue.row }}{% endif %}</td>
+        <td>{{ issue.code or '-' }}</td>
+        <td>{{ issue.message }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">未发现异常明细。</div>
+  {% endif %}
+
+  <h2>错误样例（已截断）</h2>
+  {% if report.samples %}
+  <table>
+    <thead><tr><th>表 / 字段</th><th>行号</th><th>值</th><th>规则</th></tr></thead>
+    <tbody>
+    {% for sample in report.samples %}
+      <tr>
+        <td>{{ sample.table or '-' }}{% if sample.field %} / {{ sample.field }}{% endif %}</td>
+        <td>{{ sample.row if sample.row is not none else '-' }}</td>
+        <td>{{ sample.value if sample.value is not none else '-' }}</td>
+        <td>{{ sample.message or sample.rule or '-' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">本次校验未产生错误样例。</div>
+  {% endif %}
+
+  <h2>血缘链路</h2>
+  {% if report.lineage_graph.text %}
+  <pre>{{ report.lineage_graph.text }}</pre>
+  <h3>Mermaid 源码</h3>
+  <pre>{{ report.lineage_graph.mermaid }}</pre>
+  {% else %}
+  <div class="empty">本次任务未配置血缘关联规则。</div>
+  {% endif %}
+
+  <h2>修复建议</h2>
+  <ol>
+    {% for suggestion in report.suggestions %}<li>{{ suggestion }}</li>{% endfor %}
+  </ol>
+
+  <footer>
+    本报告由数包闸检 v{{ report.meta.tool_version }} 在本地离线生成，不包含外部资源引用。
+    配置哈希 {{ report.meta.config_hash }}，生成时间 {{ report.meta.generated_at }}。
+  </footer>
+</div>
+</body>
+</html>

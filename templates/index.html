@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}发起校验 · 数包闸检{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">CROSS-DOMAIN DATA PACKET GATE</p>
+    <h1>让每一个离线数据包<br>在跨域前通过可信校验</h1>
+    <p class="hero-copy">
+      压缩包安全解析、文件哈希、数据契约、跨表血缘与异常值抽检一次完成。
+      服务仅在本机运行，不访问公网，校验完成后自动清理临时文件。
+    </p>
+    <div class="stat-row">
+      <div class="stat"><strong>{{ stats.total }}</strong><span>累计任务</span></div>
+      <div class="stat"><strong>{{ stats.passed }}</strong><span>通过</span></div>
+      <div class="stat"><strong>{{ stats.failed }}</strong><span>不通过</span></div>
+    </div>
+  </div>
+  <div class="hero-note">
+    <h2>准入红线</h2>
+    <ul>
+      <li>拒绝路径穿越、符号链接与绝对路径</li>
+      <li>拦截 Zip 炸弹与超阈值解压体积</li>
+      <li>强制根目录提供 manifest.yaml</li>
+      <li>可执行文件与冗余文件直接告警</li>
+      <li>临时解压目录校验后自动销毁</li>
+    </ul>
+  </div>
+</section>
+
+<div class="layout">
+  <section class="card form-card">
+    <div class="card-head">
+      <h2>提交数据包</h2>
+      <span class="muted">zip / tar.gz · 支持 csv / parquet / sqlite</span>
+    </div>
+    <form method="post" enctype="multipart/form-data" id="upload-form">
+      <label class="field">
+        <span>数据包 <b>*</b></span>
+        <input type="file" name="packet" accept=".zip,.tar.gz,.tgz" required>
+        <small>压缩包根目录必须包含 manifest.yaml，文件大小受配置限制。</small>
+      </label>
+
+      <div class="form-grid">
+        <label class="field">
+          <span>内置校验方案</span>
+          <select name="preset">
+            <option value="trade">交易域 · 用户/交易/商品/订单</option>
+            <option value="product">商品域 · 商品/订单</option>
+          </select>
+          <small>选用内置契约与血缘规则样例。</small>
+        </label>
+        <label class="field">
+          <span>预期整包哈希（可选）</span>
+          <input type="text" name="expected_hash" maxlength="80"
+                 placeholder="SHA256 摘要或 sha256:摘要">
+          <small>不填写则跳过整包哈希比对。</small>
+        </label>
+      </div>
+
+      <details class="advanced">
+        <summary>使用自定义契约与血缘规则</summary>
+        <div class="form-grid">
+          <label class="field">
+            <span>数据契约 YAML</span>
+            <input type="file" name="contract" accept=".yaml,.yml">
+            <small>上传后覆盖内置契约。</small>
+          </label>
+          <label class="field">
+            <span>血缘规则 YAML</span>
+            <input type="file" name="lineage" accept=".yaml,.yml">
+            <small>上传后覆盖内置血缘规则。</small>
+          </label>
+        </div>
+      </details>
+
+      <div class="actions">
+        <button class="btn primary" type="submit">开始离线校验</button>
+        <span class="muted">单用户本地模式 · 不保存原始数据包</span>
+      </div>
+    </form>
+  </section>
+
+  <aside class="card side-card">
+    <h2>校验流程</h2>
+    <ol class="steps">
+      <li><b>01</b><span>压缩包安全检查<small>格式、路径、体积、manifest</small></span></li>
+      <li><b>02</b><span>文件完整性<small>MD5 / SHA256、冗余与黑名单</small></span></li>
+      <li><b>03</b><span>数据契约<small>字段、类型、非空、枚举、长度</small></span></li>
+      <li><b>04</b><span>跨表血缘<small>孤立记录、引用缺失、基数</small></span></li>
+      <li><b>05</b><span>异常值抽检<small>范围、正则、日期、空值、重复</small></span></li>
+      <li><b>06</b><span>报告与留痕<small>Markdown / HTML / JSON</small></span></li>
+    </ol>
+    <p class="tip">离线提示：所有依赖均可通过 <code>pip download</code> 预下载后拷贝至隔离环境安装。</p>
+  </aside>
+</div>
+{% endblock %}

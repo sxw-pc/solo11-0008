@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}历史任务 · 数包闸检{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="eyebrow">LOCAL AUDIT TRAIL</p>
+    <h1>历史校验任务</h1>
+    <p class="muted">任务元数据、结果与报告均保存在本地 SQLite 与工作目录。</p>
+  </div>
+  <a class="btn primary" href="{{ url_for('index') }}">发起新校验</a>
+</section>
+
+<section class="card filter-card">
+  <form method="get" class="filter-form">
+    <label class="field compact">
+      <span>任务 ID / 数据包</span>
+      <input type="search" name="q" value="{{ filters.query }}" placeholder="输入关键字">
+    </label>
+    <label class="field compact">
+      <span>校验结果</span>
+      <select name="status">
+        <option value="" {% if not filters.status %}selected{% endif %}>全部</option>
+        <option value="passed" {% if filters.status == 'passed' %}selected{% endif %}>通过</option>
+        <option value="failed" {% if filters.status == 'failed' %}selected{% endif %}>不通过</option>
+        <option value="running" {% if filters.status == 'running' %}selected{% endif %}>运行中</option>
+      </select>
+    </label>
+    <label class="field compact">
+      <span>开始日期</span>
+      <input type="date" name="date_from" value="{{ filters.date_from }}">
+    </label>
+    <label class="field compact">
+      <span>结束日期</span>
+      <input type="date" name="date_to" value="{{ filters.date_to }}">
+    </label>
+    <div class="filter-actions">
+      <button class="btn" type="submit">筛选</button>
+      <a class="btn ghost" href="{{ url_for('task_list') }}">重置</a>
+    </div>
+  </form>
+</section>
+
+<section class="card table-card">
+  {% if tasks %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>任务 ID</th><th>数据包</th><th>上传时间</th>
+          <th>结果</th><th>耗时</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for task in tasks %}
+        <tr>
+          <td><a class="mono" href="{{ url_for('task_detail', task_id=task.task_id) }}">{{ task.task_id }}</a></td>
+          <td>
+            <strong>{{ task.packet_name }}</strong>
+            <small class="muted">{{ task.archive_type or '待识别' }} · {{ task.packet_size }} B</small>
+          </td>
+          <td class="nowrap">{{ task.uploaded_at.replace('T', ' ') }}</td>
+          <td>
+            {% if task.status == 'passed' %}
+              <span class="pill pass">通过</span>
+            {% elif task.status == 'running' %}
+              <span class="pill running">运行中</span>
+            {% else %}
+              <span class="pill fail">不通过</span>
+            {% endif %}
+          </td>
+          <td>{{ '%.2f'|format(task.duration_seconds or 0) }}s</td>
+          <td class="row-actions">
+            <a class="text-link" href="{{ url_for('task_detail', task_id=task.task_id) }}">详情</a>
+            {% if task.report_html %}
+              <a class="text-link" href="{{ url_for('download_report', task_id=task.task_id, fmt='html') }}">HTML</a>
+            {% endif %}
+            <form method="post" action="{{ url_for('delete_task', task_id=task.task_id) }}"
+                  class="inline-form js-confirm" data-confirm="确认删除该任务及全部报告？">
+              <button class="text-link danger" type="submit">删除</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <h2>暂无匹配任务</h2>
+    <p>调整筛选条件，或上传一个新的离线数据包开始校验。</p>
+    <a class="btn primary" href="{{ url_for('index') }}">发起校验</a>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
