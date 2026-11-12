@@ -27,6 +27,30 @@
 | {{ check.name }} | {{ "通过" if check.passed else "不通过" }} | {{ check.error_count }} | {{ check.summary }} |
 {% endfor %}
 
+## 跨批次质量趋势
+
+{% if report.trend -%}
+{% if report.trend.status == "ok" -%}
+- 基线：同契约指纹（`{{ report.trend.contract_fingerprint }}`）最近 {{ report.trend.baseline_tasks }} 次成功任务
+- 对比指标 {{ report.trend.metrics_count }} 项；阈值：行数波动 ±{{ "%.0f"|format(report.trend.row_change_ratio * 100) }}%，比率增量 +{{ "%.2f"|format(report.trend.rate_increase * 100) }}pp
+- 趋势对比仅作警示，不影响准入结论
+{% if report.trend.deviations %}
+
+| 指标 | 位置 | 基线值 | 本次值 | 变化 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+{% for item in report.trend.deviations -%}
+| {{ item.rule_label }} | {{ item.table }}{% if item.column %} / {{ item.column }}{% endif %} | {{ item.baseline_text }} | {{ item.current_text }} | {{ item.change_text }} | {{ item.message }} |
+{% endfor %}
+{%- else %}
+未发现跨批次质量突变。
+{%- endif %}
+{%- else -%}
+{{ report.trend.summary }}。趋势对比仅作警示，不影响准入结论。
+{%- endif %}
+{%- else -%}
+本次任务未记录趋势对比数据。
+{%- endif %}
+
 ## 异常明细
 
 {% if report.issues -%}

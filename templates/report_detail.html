@@ -68,6 +68,40 @@
   </section>
 </div>
 
+{% if report.trend %}
+<section class="card">
+  <div class="card-head"><h2>跨批次质量趋势</h2><span class="muted">仅警示，不影响准入结论</span></div>
+  {% if report.trend.status == 'ok' %}
+  <p class="muted">基线：同契约指纹（{{ report.trend.contract_fingerprint }}）最近 {{ report.trend.baseline_tasks }} 次成功任务 ·
+    对比指标 {{ report.trend.metrics_count }} 项 ·
+    阈值：行数波动 ±{{ '%.0f'|format(report.trend.row_change_ratio * 100) }}%、比率增量 +{{ '%.2f'|format(report.trend.rate_increase * 100) }}pp</p>
+  {% if report.trend.deviations %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>指标</th><th>位置</th><th>基线值</th><th>本次值</th><th>变化</th><th>说明</th></tr></thead>
+      <tbody>
+      {% for item in report.trend.deviations %}
+        <tr>
+          <td>{{ item.rule_label }}</td>
+          <td class="mono">{{ item.table }}{% if item.column %} / {{ item.column }}{% endif %}</td>
+          <td>{{ item.baseline_text }}</td>
+          <td>{{ item.current_text }}</td>
+          <td>{{ item.change_text }}</td>
+          <td>{{ item.message }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state compact"><p>与历史基线对比未发现质量突变。</p></div>
+  {% endif %}
+  {% else %}
+  <div class="empty-state compact"><p>{{ report.trend.summary }}</p></div>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="card">
   <div class="card-head"><h2>异常明细</h2><span class="muted">最多展示 100 条，完整内容见报告</span></div>
   {% if report.issues %}

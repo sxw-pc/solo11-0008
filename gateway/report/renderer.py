@@ -130,6 +130,7 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
     if not suggestions:
         suggestions.append("本次校验未发现阻断性问题，可按现网变更流程执行准入。")
     lineage = next((item for item in results if item.get("key") == "lineage"), {})
+    trend = next((item for item in results if item.get("key") == "trend"), None)
     samples = []
     for result in results:
         samples.extend(result.get("samples", []))
@@ -149,6 +150,7 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
         "samples": samples[:50],
         "suggestions": suggestions,
         "lineage_graph": lineage.get("graph", {}),
+        "trend": trend,
     }
 
 

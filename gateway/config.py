@@ -49,6 +49,10 @@ class AppConfig:
     )
     allowed_extra_paths: tuple = ()
     log_level: str = "INFO"
+    trend_enabled: bool = True
+    trend_baseline_tasks: int = 5
+    trend_row_change_ratio: float = 0.5
+    trend_rate_increase: float = 0.05
 
     reports_dir: Path = field(init=False)
     uploads_dir: Path = field(init=False)
@@ -71,6 +75,12 @@ class AppConfig:
             raise ValueError("解压大小上限必须为正数")
         if int(self.max_archive_entries) <= 0:
             raise ValueError("压缩包条目上限必须为正数")
+        if int(self.trend_baseline_tasks) < 1:
+            raise ValueError("trend_baseline_tasks 必须为正整数")
+        if float(self.trend_row_change_ratio) < 0:
+            raise ValueError("trend_row_change_ratio 不能为负数")
+        if float(self.trend_rate_increase) < 0:
+            raise ValueError("trend_rate_increase 不能为负数")
         # 即使调用方传入软链接或相对路径，也统一固定在工作目录之下。
         self.reports_dir = self.workspace_dir / "reports"
         self.uploads_dir = self.workspace_dir / "uploads"
@@ -127,6 +137,10 @@ class AppConfig:
             "sample_ratio": self.sample_ratio,
             "max_uncompressed_bytes": self.max_uncompressed_bytes,
             "max_compression_ratio": self.max_compression_ratio,
+            "trend_enabled": self.trend_enabled,
+            "trend_baseline_tasks": self.trend_baseline_tasks,
+            "trend_row_change_ratio": self.trend_row_change_ratio,
+            "trend_rate_increase": self.trend_rate_increase,
             "config_hash": self.fingerprint(),
         }
 

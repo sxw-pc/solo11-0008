@@ -1,7 +1,8 @@
 """单任务校验编排流水线。
 
-串联压缩包安全检查、哈希校验、表读取、Schema、血缘、异常规则与报告生成。
-任何安全或格式异常都会转化为结构化失败结果并持久化，不会导致 Web 服务崩溃。
+串联压缩包安全检查、哈希校验、表读取、Schema、血缘、异常规则、跨批次趋势
+对比与报告生成。任何安全或格式异常都会转化为结构化失败结果并持久化，
+不会导致 Web 服务崩溃。趋势对比阶段只警示、不阻断准入结论。
 """
 
 from datetime import datetime
@@ -20,6 +21,7 @@ from .validator.anomaly_check import validate_anomalies
 from .validator.hash_verify import compute_file_hashes, verify_hashes
 from .validator.lineage_check import LineageRuleError, load_lineage_rules, validate_lineage
 from .validator.schema_check import ContractError, load_contract, validate_schema
+from .validator.trend_check import run_trend_stage
 
 
 def _now() -> str:
@@ -151,6 +153,7 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
     results: List[Dict[str, Any]] = []
     extraction = None
     unexpected = ""
+    trend_metrics: Optional[List[Dict[str, Any]]] = None
     try:
         try:
             extraction = load_archive(packet_path, config)
@@ -207,6 +210,11 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
                     "契约加载失败，无法执行异常规则", "contract_error")
             results.append(anomaly_result)
             lines.append("异常抽检: %s" % anomaly_result["summary"])
+            trend_result, trend_metrics = run_trend_stage(
+                config, store, contract_path, task_id, tables, anomaly_result)
+            if trend_result is not None:
+                results.append(trend_result)
+                lines.append("趋势对比: %s" % trend_result["summary"])
     except Exception as exc:  # 保证异常不会穿透 Web 请求，同时记录完整本地日志。
         unexpected = "%s: %s" % (type(exc).__name__, exc)
         results.append(_error_result("internal", "校验流水线", "内部异常: %s" % unexpected))
@@ -244,8 +252,9 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
     task["result_json"] = {"results": results}
     if not report:
         task["error_summary"] = (task["error_summary"] + "；" + unexpected)[:500]
-    store.update_task(
-        task_id, finished_at=task["finished_at"], status=task["status"],
+    store.finalize_task(
+        task_id, metrics=trend_metrics,
+        finished_at=task["finished_at"], status=task["status"],
         passed=task["passed"], archive_type=task["archive_type"],
         duration_seconds=task["duration_seconds"], error_summary=task["error_summary"],
         report_md=task["report_md"], report_html=task["report_html"],

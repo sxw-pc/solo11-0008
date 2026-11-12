@@ -26,6 +26,7 @@
     th { background:#eef2f5; font-weight:600; }
     .pass { color:var(--ok); font-weight:600; }
     .fail { color:var(--bad); font-weight:600; }
+    .warn-text { color:var(--warn); font-weight:600; }
     pre { margin:0; padding:12px; background:#101820; color:#e8edf2; border-radius:6px;
           overflow-x:auto; white-space:pre-wrap; word-break:break-word; }
     .muted { color:var(--muted); }
@@ -77,6 +78,38 @@
     {% endfor %}
     </tbody>
   </table>
+
+  <h2>跨批次质量趋势</h2>
+  {% if report.trend %}
+    {% if report.trend.status == 'ok' %}
+  <p class="muted">基线：同契约指纹（{{ report.trend.contract_fingerprint }}）最近 {{ report.trend.baseline_tasks }} 次成功任务；
+    对比指标 {{ report.trend.metrics_count }} 项；阈值：行数波动 &plusmn;{{ '%.0f'|format(report.trend.row_change_ratio * 100) }}%，
+    比率增量 +{{ '%.2f'|format(report.trend.rate_increase * 100) }}pp。趋势对比仅作警示，不影响准入结论。</p>
+      {% if report.trend.deviations %}
+  <table>
+    <thead><tr><th>指标</th><th>位置</th><th>基线值</th><th>本次值</th><th>变化</th><th>说明</th></tr></thead>
+    <tbody>
+      {% for item in report.trend.deviations %}
+      <tr>
+        <td>{{ item.rule_label }}</td>
+        <td>{{ item.table }}{% if item.column %} / {{ item.column }}{% endif %}</td>
+        <td>{{ item.baseline_text }}</td>
+        <td>{{ item.current_text }}</td>
+        <td class="warn-text">{{ item.change_text }}</td>
+        <td>{{ item.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+      {% else %}
+  <div class="empty">与历史基线对比未发现质量突变。</div>
+      {% endif %}
+    {% else %}
+  <div class="empty">{{ report.trend.summary }}。趋势对比仅作警示，不影响准入结论。</div>
+    {% endif %}
+  {% else %}
+  <div class="empty">本次任务未记录趋势对比数据。</div>
+  {% endif %}
 
   <h2>异常明细</h2>
   {% if report.issues %}

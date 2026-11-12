@@ -1,7 +1,8 @@
 """生成离线 Mock 数据包。
 
 仅使用 pandas/pyarrow 与标准库，不访问网络。重新执行会覆盖 fixtures 下的
-合法与异常压缩包。数据均为虚构样例，不包含真实企业或个人信息。
+合法与异常压缩包，并重新生成 trend_packets 下同契约多批趋势演示数据。
+数据均为虚构样例，不包含真实企业或个人信息。
 """
 
 from datetime import datetime, timedelta
@@ -82,6 +83,50 @@ def _orders(trades: pd.DataFrame) -> pd.DataFrame:
             "product_id": trade["product_id"],
             "amount": float(trade["amount"]),
             "order_date": trade["trade_date"],
+        })
+    return pd.DataFrame(rows)
+
+
+def _users_batch(count: int) -> pd.DataFrame:
+    """构造指定行数的虚构用户数据，供趋势系列批次使用。
+
+    低基数列的取值数随行数等比缩放，保证不同批次间重复率指标稳定，
+    行数变化不会连带制造重复的伪突变。
+    """
+    regions = ["north", "south", "east", "west"]
+    age_cardinality = max(1, count // 4)
+    signup_cardinality = max(1, count * 3 // 4)
+    rows = []
+    for index in range(1, count + 1):
+        signup = datetime(2024, 1, 1) + timedelta(days=index % signup_cardinality)
+        rows.append({
+            "user_id": "U%04d" % index,
+            "user_name": "Mock User %04d" % index,
+            "region": regions[index % 4],
+            "age": 20 + (index % age_cardinality),
+            "email": "user%04d@mock.local" % index,
+            "signup_date": signup.strftime("%Y-%m-%d"),
+        })
+    return pd.DataFrame(rows)
+
+
+def _trades_batch(user_count: int, count: int, note_null_every: int = 20) -> pd.DataFrame:
+    """构造指定行数与备注空值比例的虚构交易，仅引用已存在的用户。"""
+    statuses = ["paid", "pending", "refunded"]
+    date_cardinality = max(1, count // 8)
+    rows = []
+    for index in range(1, count + 1):
+        trade_date = datetime(2024, 2, 1) + timedelta(days=index % date_cardinality)
+        rows.append({
+            "trade_id": "T%04d" % index,
+            "user_id": "U%04d" % (((index - 1) % user_count) + 1),
+            "product_id": "P%03d" % (((index - 1) % 8) + 1),
+            "amount": round(20 + (index * 13.7) % 900, 2),
+            "quantity": 1 + index % 5,
+            "status": statuses[index % 3],
+            "trade_date": trade_date.strftime("%Y-%m-%d"),
+            "note": (None if note_null_every and index % note_null_every == 0
+                     else "mock note %04d" % index),
         })
     return pd.DataFrame(rows)
 
@@ -235,6 +280,43 @@ def generate() -> None:
             _zip_folder(folder, invalid_dir / scenario / (scenario + ".zip"), extras)
 
 
+def generate_trend_series(target_dir=None) -> list:
+    """生成同契约、同结构的三批数据包，用于演示跨批次质量趋势对比。
+
+    前两批为正常基线（users 120 行、trades 240 行、note 空值约 5%），
+    第三批行数骤降约 67%、note 空值率升至约 14%。三批在单次校验下均
+    全部通过，只有趋势对比阶段能发现第三批的质量突变。
+
+    Args:
+        target_dir: 输出目录，默认 ``fixtures/trend_packets``；已存在时先清空。
+    Returns:
+        按批次顺序排列的数据包路径列表。
+    """
+    target = Path(target_dir) if target_dir else ROOT / "trend_packets"
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    batches = [
+        ("trend_batch_1.zip", 120, 240, 20),
+        ("trend_batch_2.zip", 120, 240, 20),
+        ("trend_batch_3.zip", 40, 80, 7),
+    ]
+    paths = []
+    with tempfile.TemporaryDirectory(prefix="trend-fixture-") as temp:
+        temp_path = Path(temp)
+        for filename, user_count, trade_count, null_every in batches:
+            name = filename[:-len(".zip")]
+            folder = temp_path / name
+            folder.mkdir()
+            users = _users_batch(user_count)
+            trades = _trades_batch(user_count, trade_count, null_every)
+            _base(folder, name, users=users, trades=trades)
+            _zip_folder(folder, target / filename)
+            paths.append(target / filename)
+    return paths
+
+
 if __name__ == "__main__":
     generate()
+    generate_trend_series()
     print("fixtures generated at", ROOT)

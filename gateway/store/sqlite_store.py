@@ -20,6 +20,11 @@ _COLUMNS = (
 )
 _UPDATABLE = set(_COLUMNS) - {"task_id"}
 
+_METRIC_COLUMNS = (
+    "task_id", "contract_fingerprint", "metric_key", "table_name",
+    "column_name", "rule", "metric_value", "task_status", "created_at",
+)
+
 
 class SQLiteStore:
     """本地校验任务持久化接口。"""
@@ -47,7 +52,11 @@ class SQLiteStore:
             connection.close()
 
     def init_db(self) -> None:
-        """创建任务表与常用筛选索引，可重复执行。"""
+        """创建任务表、指标表与常用筛选索引，可重复执行。
+
+        老版本数据库缺少 metrics 表，``CREATE TABLE IF NOT EXISTS`` 会在
+        打开时平滑补齐，不需要停机迁移。
+        """
         with self._connection() as connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -73,10 +82,28 @@ class SQLiteStore:
                     result_json TEXT NOT NULL DEFAULT '{}'
                 )
             """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    contract_fingerprint TEXT NOT NULL,
+                    metric_key TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    column_name TEXT NOT NULL DEFAULT '',
+                    rule TEXT NOT NULL,
+                    metric_value REAL NOT NULL,
+                    task_status TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT ''
+                )
+            """)
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time "
                                "ON tasks(uploaded_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status "
                                "ON tasks(status)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_metrics_fingerprint "
+                               "ON metrics(contract_fingerprint, task_id)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_metrics_task "
+                               "ON metrics(task_id)")
 
     @staticmethod
     def _serialize(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -128,6 +155,88 @@ class SQLiteStore:
                 "UPDATE tasks SET %s WHERE task_id = ?" % assignments, params)
             return cursor.rowcount > 0
 
+    def finalize_task(self, task_id: str, metrics: Optional[List[Dict[str, Any]]] = None,
+                      **fields: Any) -> bool:
+        """在同一事务中更新任务状态并整体替换任务指标。
+
+        指标写入与任务状态更新同生共死：任一失败都会整体回滚，不会留下
+        半截指标污染后续基线。``metrics=None`` 表示本次不触碰指标表。
+        """
+        updates = {key: value for key, value in fields.items() if key in _UPDATABLE}
+        if "result_json" in updates and not isinstance(updates["result_json"], str):
+            updates["result_json"] = json.dumps(
+                updates["result_json"], ensure_ascii=False, default=str)
+        if "passed" in updates:
+            updates["passed"] = 1 if updates["passed"] else 0
+        updated = False
+        with self._connection() as connection:
+            if updates:
+                assignments = ", ".join("%s = ?" % key for key in updates)
+                params = [updates[key] for key in updates] + [task_id]
+                cursor = connection.execute(
+                    "UPDATE tasks SET %s WHERE task_id = ?" % assignments, params)
+                updated = cursor.rowcount > 0
+            if metrics is not None:
+                connection.execute("DELETE FROM metrics WHERE task_id = ?", (task_id,))
+                if metrics:
+                    status = str(updates.get("status", ""))
+                    created = str(updates.get("finished_at")
+                                  or datetime.now().isoformat(timespec="seconds"))
+                    rows = [(
+                        task_id,
+                        str(item.get("contract_fingerprint", "")),
+                        str(item.get("metric_key", "")),
+                        str(item.get("table_name", "")),
+                        str(item.get("column_name", "")),
+                        str(item.get("rule", "")),
+                        float(item.get("metric_value", 0.0)),
+                        status,
+                        created,
+                    ) for item in metrics]
+                    connection.executemany(
+                        "INSERT INTO metrics (%s) VALUES (%s)"
+                        % (",".join(_METRIC_COLUMNS),
+                           ",".join("?" for _ in _METRIC_COLUMNS)),
+                        rows)
+        return updated
+
+    def baseline_metrics(self, contract_fingerprint: str, exclude_task_id: str = "",
+                         max_tasks: int = 5) -> List[Dict[str, Any]]:
+        """查询同契约指纹下最近若干次成功任务的指标，作为趋势基线。
+
+        通过 JOIN tasks 过滤状态，被删除任务的指标自然不可见；同一任务的
+        指标按插入顺序连续返回。
+        """
+        max_tasks = max(1, int(max_tasks))
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT m.task_id AS task_id, m.table_name AS table_name, "
+                "m.column_name AS column_name, m.rule AS rule, "
+                "m.metric_value AS metric_value, t.uploaded_at AS uploaded_at "
+                "FROM metrics m JOIN tasks t ON t.task_id = m.task_id "
+                "WHERE m.contract_fingerprint = ? AND t.status = 'passed' "
+                "AND m.task_id <> ? "
+                "ORDER BY t.uploaded_at DESC, t.rowid DESC, m.id ASC",
+                (contract_fingerprint, exclude_task_id)).fetchall()
+        selected: List[Dict[str, Any]] = []
+        seen = set()
+        for row in rows:
+            task_id = row["task_id"]
+            if task_id not in seen:
+                if len(seen) >= max_tasks:
+                    break
+                seen.add(task_id)
+            selected.append(dict(row))
+        return selected
+
+    def task_metrics(self, task_id: str) -> List[Dict[str, Any]]:
+        """返回单个任务已持久化的全部指标，按写入顺序排列。"""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM metrics WHERE task_id = ? ORDER BY id",
+                (task_id,)).fetchall()
+        return [dict(row) for row in rows]
+
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         """将数据库行转换为含解析后 result 的字典。"""
@@ -177,9 +286,10 @@ class SQLiteStore:
         return [self._row_to_dict(row) for row in rows]
 
     def delete_task(self, task_id: str) -> bool:
-        """删除数据库任务记录，返回是否删除成功。"""
+        """删除任务记录及其质量指标，同一事务保证不残留孤儿指标。"""
         with self._connection() as connection:
             cursor = connection.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+            connection.execute("DELETE FROM metrics WHERE task_id = ?", (task_id,))
             return cursor.rowcount > 0
 
     def stats(self) -> Dict[str, int]:
