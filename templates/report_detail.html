@@ -56,17 +56,40 @@
     <div class="check-list">
       {% for check in report.checks %}
       <div class="check-item">
-        <span class="dot {{ 'ok' if check.passed else 'bad' }}"></span>
+        <span class="dot {{ 'ok' if check.passed else ('warn' if check.degraded or check.skipped else 'bad') }}"></span>
         <div>
           <strong>{{ check.name }}</strong>
           <p>{{ check.summary }}</p>
         </div>
-        <span class="pill {{ 'pass' if check.passed else 'fail' }}">{{ '通过' if check.passed else '不通过' }}</span>
+        {% if check.passed %}
+        <span class="pill pass">通过</span>
+        {% elif check.skipped %}
+        <span class="pill warn">跳过</span>
+        {% elif check.terminated %}
+        <span class="pill fail">不通过 · 阻断</span>
+        {% elif check.degraded %}
+        <span class="pill warn">不通过 · 已降级</span>
+        {% else %}
+        <span class="pill fail">不通过</span>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
   </section>
 </div>
+
+{% if report.degradation.active %}
+<section class="card">
+  <div class="card-head"><h2>降级执行</h2><span class="muted">阻断级别与跳过明细</span></div>
+  <dl class="kv">
+    <dt>降级后继续执行</dt><dd>{{ report.degradation.degraded_names | join('、') or '无' }}</dd>
+    <dt>阻断终止位置</dt><dd>{{ report.degradation.terminated_name or '无' }}</dd>
+    <dt>未执行（跳过）</dt><dd>{{ report.degradation.skipped_names | join('、') or '无' }}</dd>
+    <dt>阶段阻断级别</dt>
+    <dd class="mono">{% for key, level in report.degradation.levels.items() %}{{ key }}={{ '阻断' if level == 'block' else '降级' }}{{ '、' if not loop.last }}{% endfor %}</dd>
+  </dl>
+</section>
+{% endif %}
 
 <section class="card">
   <div class="card-head"><h2>异常明细</h2><span class="muted">最多展示 100 条，完整内容见报告</span></div>

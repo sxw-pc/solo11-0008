@@ -67,6 +67,9 @@
             {% else %}
               <span class="pill fail">不通过</span>
             {% endif %}
+            {% if task.degraded %}
+              <span class="pill warn">含降级</span>
+            {% endif %}
           </td>
           <td>{{ '%.2f'|format(task.duration_seconds or 0) }}s</td>
           <td class="row-actions">

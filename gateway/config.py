@@ -13,6 +13,9 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from .levels import (DEFAULT_STAGE_LEVELS, normalize_rule_levels,
+                     normalize_stage_levels)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WORKSPACE = PROJECT_ROOT / "workspace"
 DEFAULT_CONTRACT = PROJECT_ROOT / "fixtures" / "mock_contract" / "user_trade_contract.yaml"
@@ -49,6 +52,11 @@ class AppConfig:
     )
     allowed_extra_paths: tuple = ()
     log_level: str = "INFO"
+    # 各校验阶段与单条规则的阻断级别（block/degrade）。默认与历史行为
+    # 完全一致：仅压缩包安全阶段阻断，其余数据类校验失败后降级继续。
+    # 安全类与基础设施类规则钉死为阻断，配置降级会抛出 ValueError。
+    stage_levels: dict = field(default_factory=dict)
+    rule_levels: dict = field(default_factory=dict)
 
     reports_dir: Path = field(init=False)
     uploads_dir: Path = field(init=False)
@@ -71,6 +79,9 @@ class AppConfig:
             raise ValueError("解压大小上限必须为正数")
         if int(self.max_archive_entries) <= 0:
             raise ValueError("压缩包条目上限必须为正数")
+        # 归一化阻断级别：合并默认值并校验钉死规则，非法配置在建目录前失败。
+        self.stage_levels = normalize_stage_levels(self.stage_levels)
+        self.rule_levels = normalize_rule_levels(self.rule_levels)
         # 即使调用方传入软链接或相对路径，也统一固定在工作目录之下。
         self.reports_dir = self.workspace_dir / "reports"
         self.uploads_dir = self.workspace_dir / "uploads"
@@ -107,7 +118,11 @@ class AppConfig:
         return cls(**data)
 
     def fingerprint(self) -> str:
-        """返回稳定的配置指纹，用于报告审计留痕。"""
+        """返回稳定的配置指纹，用于报告审计留痕。
+
+        阻断级别仅在偏离默认值时纳入指纹，保证默认配置下指纹与历史
+        版本完全一致，存量任务的配置哈希仍可比对。
+        """
         snapshot: Dict[str, Any] = {
             "sample_ratio": self.sample_ratio,
             "max_uncompressed_bytes": self.max_uncompressed_bytes,
@@ -116,6 +131,9 @@ class AppConfig:
             "blocked_extensions": list(self.blocked_extensions),
             "allowed_extra_paths": list(self.allowed_extra_paths),
         }
+        if self.stage_levels != DEFAULT_STAGE_LEVELS or self.rule_levels:
+            snapshot["stage_levels"] = dict(self.stage_levels)
+            snapshot["rule_levels"] = dict(self.rule_levels)
         raw = json.dumps(snapshot, sort_keys=True, ensure_ascii=False)
         return sha256(raw.encode("utf-8")).hexdigest()[:16]
 

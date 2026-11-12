@@ -13,6 +13,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .. import __version__
 from ..config import PROJECT_ROOT, AppConfig
+from ..levels import DEFAULT_STAGE_LEVELS, STAGE_NAMES, STAGE_SEQUENCE
 
 TEMPLATE_DIR = PROJECT_ROOT / "templates"
 _SUGGESTIONS = {
@@ -53,7 +54,11 @@ def _check_error_count(result: Dict[str, Any]) -> int:
 
 
 def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """把各校验项的错误归一化为报告问题列表。"""
+    """把各校验项的错误归一化为报告问题列表。
+
+    问题条目保留错误的 ``level`` 阻断级别标记（若校验器已标注），
+    供 JSON 报告消费方区分阻断/降级问题；旧数据无该字段时为空。
+    """
     issues: List[Dict[str, Any]] = []
     for result in results:
         check = result.get("name") or result.get("key")
@@ -65,6 +70,7 @@ def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 for error in relation.get("errors", []):
                     issues.append({
                         "check": check, "code": error.get("code"),
+                        "level": error.get("level"),
                         "message": "%s: %s" % (relation.get("name"), error.get("message")),
                         "relation": relation.get("name"),
                         "table": relation.get("left_table"),
@@ -76,6 +82,7 @@ def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     if not rule.get("passed"):
                         issues.append({
                             "check": check, "code": rule.get("rule"),
+                            "level": rule.get("level"),
                             "table": field.get("table"), "field": field.get("field"),
                             "message": rule.get("error") or (
                                 "异常率 %.2f%% / 阈值 %.2f%%" % (
@@ -98,8 +105,62 @@ def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return unique[:100]
 
 
+def _is_skipped_result(result: Dict[str, Any]) -> bool:
+    """判断结果是否为未执行阶段的跳过占位（兼容新旧两种标记）。"""
+    if result.get("skipped"):
+        return True
+    return any(error.get("code") == "skipped"
+               for error in result.get("errors", []) if isinstance(error, dict))
+
+
+def _infer_degradation(results: List[Dict[str, Any]],
+                       config: AppConfig) -> Dict[str, Any]:
+    """从校验结果推断降级执行信息。
+
+    新任务的结果带有显式 degraded/terminated/skipped 标记；历史任务数据
+    没有标记时，通过跳过占位反推阻断终止点，保证旧报告页面照常渲染。
+    """
+    degraded = [str(item.get("key")) for item in results if item.get("degraded")]
+    skipped = [str(item.get("key")) for item in results if _is_skipped_result(item)]
+    terminated = next((str(item.get("key")) for item in results
+                       if item.get("terminated")), None)
+    if terminated is None and skipped:
+        terminated = next((str(item.get("key")) for item in results
+                           if not item.get("passed")
+                           and not _is_skipped_result(item)), None)
+    levels = dict(DEFAULT_STAGE_LEVELS)
+    levels.update(getattr(config, "stage_levels", None) or {})
+    return {
+        "levels": {key: levels.get(key, DEFAULT_STAGE_LEVELS[key])
+                   for key in STAGE_SEQUENCE},
+        "degraded_stages": degraded,
+        "terminated_at": terminated,
+        "skipped_stages": skipped,
+    }
+
+
+def _degradation_view(degradation: Dict[str, Any]) -> Dict[str, Any]:
+    """把阶段键列表转换为含展示名的报告视图。"""
+    degraded = list(degradation.get("degraded_stages") or [])
+    skipped = list(degradation.get("skipped_stages") or [])
+    terminated = degradation.get("terminated_at")
+    levels = degradation.get("levels") or dict(DEFAULT_STAGE_LEVELS)
+    return {
+        "levels": levels,
+        "degraded_stages": degraded,
+        "terminated_at": terminated,
+        "skipped_stages": skipped,
+        "degraded_names": [STAGE_NAMES.get(str(key), str(key)) for key in degraded],
+        "skipped_names": [STAGE_NAMES.get(str(key), str(key)) for key in skipped],
+        "terminated_name": STAGE_NAMES.get(str(terminated), str(terminated))
+        if terminated else None,
+        "active": bool(degraded or skipped or terminated),
+    }
+
+
 def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
-                         config: AppConfig, generated_at: Optional[str] = None) -> Dict[str, Any]:
+                         config: AppConfig, generated_at: Optional[str] = None,
+                         degradation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """组装独立报告所需的上下文。
 
     Args:
@@ -107,9 +168,14 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
         results: 各校验模块的统一结果。
         config: 用于补充配置哈希。
         generated_at: 可选生成时间，测试可注入固定值。
+        degradation: 可选的降级执行信息；缺省时从结果标记推断，兼容
+            历史任务数据。
     Returns:
         可直接传给 Jinja2、也可序列化为 JSON 的字典。
     """
+    if degradation is None:
+        degradation = _infer_degradation(results, config)
+    degradation = _degradation_view(degradation)
     checks = []
     for result in results:
         checks.append({
@@ -117,6 +183,10 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
             "passed": bool(result.get("passed")),
             "summary": result.get("summary", ""),
             "error_count": _check_error_count(result),
+            "level": degradation["levels"].get(str(result.get("key"))),
+            "degraded": bool(result.get("degraded")),
+            "terminated": bool(result.get("terminated")),
+            "skipped": _is_skipped_result(result),
         })
     passed_count = sum(1 for item in checks if item["passed"])
     total = len(checks)
@@ -149,6 +219,7 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
         "samples": samples[:50],
         "suggestions": suggestions,
         "lineage_graph": lineage.get("graph", {}),
+        "degradation": degradation,
     }
 
 

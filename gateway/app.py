@@ -175,7 +175,8 @@ def create_app(config: Optional[AppConfig] = None,
         if task is None:
             abort(404)
         results = task.get("result", {}).get("results", [])
-        report = build_report_context(task, results, config)
+        report = build_report_context(task, results, config,
+                                      degradation=task.get("degradation"))
         return render_template("report_detail.html", task=task, report=report,
                                log_preview=_log_preview(task, config), config=config)
 

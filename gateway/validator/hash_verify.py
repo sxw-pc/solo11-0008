@@ -3,11 +3,15 @@
 from fnmatch import fnmatch
 from hashlib import md5, sha256
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from ..config import AppConfig
+from ..levels import DEFAULT_STAGE_LEVELS, annotate_errors
 
 MANIFEST_NAME = "manifest.yaml"
+
+# 本阶段错误码中的安全类规则：高危可执行文件钉死为阻断，不允许降级。
+SECURITY_ERROR_CODES = frozenset({"dangerous_file"})
 
 
 def compute_file_hashes(path: Path) -> Dict[str, str]:
@@ -92,7 +96,8 @@ def verify_package_hash(package_path: Path, expected: str) -> Dict[str, Any]:
 
 def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfig,
                   expected_package_hash: Optional[str] = None,
-                  package_path: Optional[Path] = None) -> Dict[str, Any]:
+                  package_path: Optional[Path] = None,
+                  rule_levels: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """对解压文件执行哈希、缺失、冗余与恶意文件校验。
 
     manifest.files 中键为相对路径，值至少包含 md5 或 sha256。未被声明且不在
@@ -104,6 +109,8 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
         config: 黑名单与白名单配置。
         expected_package_hash: 可选的压缩包预期哈希。
         package_path: 压缩包原始路径，用于包哈希校验。
+        rule_levels: 可选的单规则阻断级别映射；提供时为每条错误补充
+            ``level`` 标记，便于流水线与报告区分阻断/降级问题。
     Returns:
         统一格式的校验结果字典，含 errors 与 checked_files。
     """
@@ -182,6 +189,8 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
                 errors.extend(package_result["errors"])
             except ValueError as exc:
                 errors.append({"code": "invalid_expected_hash", "message": str(exc)})
+    if rule_levels is not None:
+        annotate_errors(errors, rule_levels, DEFAULT_STAGE_LEVELS["hash"])
     codes = sorted({error["code"] for error in errors})
     return {
         "key": "hash", "name": "文件完整性与哈希校验", "passed": not errors,

@@ -8,11 +8,12 @@
 from datetime import date, datetime
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pandas as pd
 import yaml
 
+from ..levels import DEFAULT_STAGE_LEVELS, annotate_errors
 from ..parser.table_reader import TableData
 
 RELATIONSHIPS = {"one_to_one", "one_to_many", "many_to_one"}
@@ -231,13 +232,16 @@ def _build_graph(relations: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def validate_lineage(tables: Dict[str, TableData],
-                     rules: Dict[str, Any]) -> Dict[str, Any]:
+                     rules: Dict[str, Any],
+                     rule_levels: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """执行所有血缘关联规则。
 
     Args:
         tables: 表名到全量 TableData 的映射。血缘必须使用全量数据，避免抽样
             造成被引用键缺失的假阳性。
         rules: load_lineage_rules 返回的规则对象。
+        rule_levels: 可选的单规则阻断级别映射；提供时为每条错误补充
+            ``level`` 标记。
     Returns:
         含 passed、relations、graph、samples 的统一结果字典。
     """
@@ -264,11 +268,17 @@ def validate_lineage(tables: Dict[str, TableData],
         samples.extend(relation.get("samples", []))
     failed = [item for item in relations if not item.get("passed")]
     passed = not failed and not config_errors
+    errors = config_errors + [{"code": "relation_failed", "message": item["name"]}
+                              for item in failed]
+    if rule_levels is not None:
+        stage_level = DEFAULT_STAGE_LEVELS["lineage"]
+        annotate_errors(errors, rule_levels, stage_level)
+        for relation in relations:
+            annotate_errors(relation.get("errors"), rule_levels, stage_level)
     return {
         "key": "lineage", "name": "跨表血缘一致性校验", "passed": passed,
         "relations": relations, "graph": graph, "samples": samples[:20],
-        "errors": config_errors + [{"code": "relation_failed", "message": item["name"]}
-                                   for item in failed],
+        "errors": errors,
         "orphan_count": sum(item.get("orphan_count", 0) for item in relations),
         "missing_reference_count": sum(item.get("missing_reference_count", 0)
                                        for item in relations),

@@ -228,6 +228,7 @@ td strong { display: block; font-size: 12px; }
 .pill.pass { color: var(--ok); background: var(--ok-bg); }
 .pill.fail { color: var(--bad); background: var(--bad-bg); }
 .pill.running { color: var(--warn); background: #fff4d6; }
+.pill.warn { color: var(--warn); background: #fff4d6; }
 .empty-state { padding: 42px 20px; text-align: center; color: var(--muted); }
 .empty-state.compact { padding: 18px; }
 .empty-state h1, .empty-state h2 { color: var(--ink); }
@@ -257,6 +258,7 @@ td strong { display: block; font-size: 12px; }
 .dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: #9aa8b1; }
 .dot.ok { background: var(--ok); }
 .dot.bad { background: var(--bad); }
+.dot.warn { background: var(--warn); }
 .suggestions { margin: 0; padding-left: 20px; }
 .suggestions li { margin: 7px 0; font-size: 12px; }
 .risk-note { margin: 14px 0 0; padding: 8px 10px; color: var(--bad); background: var(--bad-bg); border-radius: 6px; font-size: 12px; }

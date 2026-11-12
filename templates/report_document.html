@@ -70,13 +70,37 @@
     {% for check in report.checks %}
       <tr>
         <td>{{ check.name }}</td>
-        <td class="{{ 'pass' if check.passed else 'fail' }}">{{ '通过' if check.passed else '不通过' }}</td>
+        {% if check.passed %}
+        <td class="pass">通过</td>
+        {% elif check.skipped %}
+        <td class="muted">跳过</td>
+        {% elif check.terminated %}
+        <td class="fail">不通过（阻断）</td>
+        {% elif check.degraded %}
+        <td class="fail">不通过（已降级）</td>
+        {% else %}
+        <td class="fail">不通过</td>
+        {% endif %}
         <td>{{ check.error_count }}</td>
         <td>{{ check.summary }}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
+
+  <h2>降级执行</h2>
+  {% if report.degradation.active %}
+  <div class="meta">
+    <div><span class="muted">降级后继续执行</span><br>{{ report.degradation.degraded_names | join('、') or '无' }}</div>
+    <div><span class="muted">阻断终止位置</span><br>{{ report.degradation.terminated_name or '无' }}</div>
+    <div><span class="muted">未执行（跳过）</span><br>{{ report.degradation.skipped_names | join('、') or '无' }}</div>
+    <div><span class="muted">阶段阻断级别</span><br>
+      {% for key, level in report.degradation.levels.items() %}{{ key }}={{ '阻断' if level == 'block' else '降级' }}{{ '、' if not loop.last }}{% endfor %}
+    </div>
+  </div>
+  {% else %}
+  <div class="empty">本次校验未发生降级或提前终止，各阶段按默认阻断级别顺序执行。</div>
+  {% endif %}
 
   <h2>异常明细</h2>
   {% if report.issues %}

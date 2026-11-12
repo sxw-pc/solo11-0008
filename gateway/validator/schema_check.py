@@ -7,12 +7,13 @@
 from datetime import date, datetime
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import jsonschema
 import pandas as pd
 import yaml
 
+from ..levels import DEFAULT_STAGE_LEVELS, annotate_errors
 from ..parser.table_reader import TableData
 
 _TYPE_MAP = {
@@ -230,12 +231,15 @@ def _truncate(value: Any, limit: int = 80) -> Any:
     return value
 
 
-def validate_schema(tables: Dict[str, TableData], contract: Dict[str, Any]) -> Dict[str, Any]:
+def validate_schema(tables: Dict[str, TableData], contract: Dict[str, Any],
+                    rule_levels: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """对所有契约表执行 Schema 校验。
 
     Args:
         tables: 表名到 TableData 的映射。
         contract: load_contract 返回的契约对象。
+        rule_levels: 可选的单规则阻断级别映射；提供时为每条错误补充
+            ``level`` 标记。
     Returns:
         含 passed、tables、errors、samples 的统一结果字典。
     """
@@ -277,6 +281,8 @@ def validate_schema(tables: Dict[str, TableData], contract: Dict[str, Any]) -> D
     passed = not all_errors
     total_rows = sum(item["rows_checked"] for item in table_results)
     total_error_rows = sum(item["error_rows"] for item in table_results)
+    if rule_levels is not None:
+        annotate_errors(all_errors, rule_levels, DEFAULT_STAGE_LEVELS["schema"])
     return {
         "key": "schema", "name": "数据契约 Schema 校验", "passed": passed,
         "tables": table_results, "errors": all_errors[:100],

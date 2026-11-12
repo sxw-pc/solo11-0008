@@ -24,8 +24,19 @@
 | 校验项 | 结果 | 错误数 | 说明 |
 | --- | --- | --- | --- |
 {% for check in report.checks -%}
-| {{ check.name }} | {{ "通过" if check.passed else "不通过" }} | {{ check.error_count }} | {{ check.summary }} |
+| {{ check.name }} | {% if check.passed %}通过{% elif check.skipped %}跳过{% elif check.terminated %}不通过（阻断）{% elif check.degraded %}不通过（已降级）{% else %}不通过{% endif %} | {{ check.error_count }} | {{ check.summary }} |
 {% endfor %}
+
+## 降级执行
+
+{% if report.degradation.active -%}
+- **降级后继续执行的校验项**：{{ report.degradation.degraded_names | join("、") or "无" }}
+- **命中阻断规则终止的校验项**：{{ report.degradation.terminated_name or "无" }}
+- **未执行（跳过）的校验项**：{{ report.degradation.skipped_names | join("、") or "无" }}
+- **阶段阻断级别**：{% for key, level in report.degradation.levels.items() %}{{ key }}={{ "阻断" if level == "block" else "降级" }}{{ "、" if not loop.last }}{% endfor %}
+{%- else -%}
+本次校验未发生降级或提前终止，各阶段按默认阻断级别顺序执行。
+{%- endif %}
 
 ## 异常明细
 

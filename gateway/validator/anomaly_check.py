@@ -7,10 +7,11 @@
 
 from datetime import date, datetime
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import pandas as pd
 
+from ..levels import DEFAULT_STAGE_LEVELS, annotate_errors, error_level
 from ..parser.table_reader import TableData
 from .custom_rules import get_custom_rule
 
@@ -232,12 +233,15 @@ def _check_field(table: str, field: str, series: pd.Series, rules: List[Any],
 
 
 def validate_anomalies(tables: Dict[str, TableData],
-                       config: Dict[str, Any]) -> Dict[str, Any]:
+                       config: Dict[str, Any],
+                       rule_levels: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """执行契约中的 anomaly_rules 字段规则。
 
     Args:
         tables: 表名到抽样后 TableData 的映射。
         config: 包含 ``anomaly_rules`` 的配置字典。
+        rule_levels: 可选的单规则阻断级别映射；提供时为每条错误与失败
+            规则补充 ``level`` 标记（失败规则以规则名为可配置码）。
     Returns:
         含 passed、fields、samples 的统一结果字典。
     """
@@ -267,6 +271,14 @@ def validate_anomalies(tables: Dict[str, TableData],
                                        table_data.row_offset, samples))
     failed_fields = [item for item in fields if not item["passed"]]
     passed = not failed_fields and not errors
+    if rule_levels is not None:
+        stage_level = DEFAULT_STAGE_LEVELS["anomaly"]
+        annotate_errors(errors, rule_levels, stage_level)
+        for field_result in fields:
+            for rule in field_result.get("rules", []):
+                if not rule.get("passed"):
+                    rule["level"] = error_level(rule.get("rule"), rule_levels,
+                                                stage_level)
     return {
         "key": "anomaly", "name": "异常值抽检规则校验", "passed": passed,
         "fields": fields, "samples": samples[:20], "errors": errors,

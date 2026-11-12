@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 _COLUMNS = (
     "task_id", "packet_name", "packet_size", "packet_sha256", "archive_type",
-    "uploaded_at", "finished_at", "status", "passed", "contract_name",
+    "uploaded_at", "finished_at", "status", "passed", "degraded", "contract_name",
     "lineage_name", "duration_seconds", "config_hash", "tool_version",
     "error_summary", "report_md", "report_html", "report_json", "log_path",
     "result_json",
@@ -47,7 +47,11 @@ class SQLiteStore:
             connection.close()
 
     def init_db(self) -> None:
-        """创建任务表与常用筛选索引，可重复执行。"""
+        """创建任务表与常用筛选索引，可重复执行。
+
+        对历史版本生成的数据库自动补齐 ``degraded`` 列（默认 0），
+        存量任务记录无需迁移即可继续查询。
+        """
         with self._connection() as connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -60,6 +64,7 @@ class SQLiteStore:
                     finished_at TEXT,
                     status TEXT NOT NULL DEFAULT 'running',
                     passed INTEGER NOT NULL DEFAULT 0,
+                    degraded INTEGER NOT NULL DEFAULT 0,
                     contract_name TEXT NOT NULL DEFAULT '',
                     lineage_name TEXT NOT NULL DEFAULT '',
                     duration_seconds REAL NOT NULL DEFAULT 0,
@@ -73,6 +78,12 @@ class SQLiteStore:
                     result_json TEXT NOT NULL DEFAULT '{}'
                 )
             """)
+            columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(tasks)")}
+            if "degraded" not in columns:
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN degraded "
+                    "INTEGER NOT NULL DEFAULT 0")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time "
                                "ON tasks(uploaded_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status "
@@ -96,6 +107,7 @@ class SQLiteStore:
         row = {name: task.get(name) for name in _COLUMNS}
         row["packet_size"] = int(row.get("packet_size") or 0)
         row["passed"] = 1 if row.get("passed") else 0
+        row["degraded"] = 1 if row.get("degraded") else 0
         row["status"] = row.get("status") or "running"
         row["uploaded_at"] = row.get("uploaded_at") or datetime.now().isoformat(timespec="seconds")
         row["result_json"] = row.get("result_json") or "{}"
@@ -121,6 +133,8 @@ class SQLiteStore:
                 updates["result_json"], ensure_ascii=False, default=str)
         if "passed" in updates:
             updates["passed"] = 1 if updates["passed"] else 0
+        if "degraded" in updates:
+            updates["degraded"] = 1 if updates["degraded"] else 0
         assignments = ", ".join("%s = ?" % key for key in updates)
         params = [updates[key] for key in updates] + [task_id]
         with self._connection() as connection:
@@ -130,13 +144,20 @@ class SQLiteStore:
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
-        """将数据库行转换为含解析后 result 的字典。"""
+        """将数据库行转换为含解析后 result 的字典。
+
+        额外暴露 ``degraded`` 标记与 ``degradation`` 降级执行明细；
+        历史数据没有这些字段时返回 False/None，不影响既有查询。
+        """
         item = dict(row)
         item["passed"] = bool(item.get("passed"))
+        item["degraded"] = bool(item.get("degraded"))
         try:
             item["result"] = json.loads(item.get("result_json") or "{}")
         except (ValueError, TypeError):
             item["result"] = {}
+        item["degradation"] = (item["result"].get("degradation")
+                               if isinstance(item["result"], dict) else None)
         return item
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
