@@ -174,8 +174,11 @@ def create_app(config: Optional[AppConfig] = None,
         task = store.get_task(task_id)
         if task is None:
             abort(404)
-        results = task.get("result", {}).get("results", [])
-        report = build_report_context(task, results, config)
+        stored_result = task.get("result", {})
+        results = stored_result.get("results", [])
+        lineage_drift = stored_result.get("lineage_drift", {})
+        report = build_report_context(task, results, config,
+                                      lineage_drift=lineage_drift)
         return render_template("report_detail.html", task=task, report=report,
                                log_preview=_log_preview(task, config), config=config)
 

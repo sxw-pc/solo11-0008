@@ -99,7 +99,8 @@ def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
-                         config: AppConfig, generated_at: Optional[str] = None) -> Dict[str, Any]:
+                         config: AppConfig, generated_at: Optional[str] = None,
+                         lineage_drift: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """组装独立报告所需的上下文。
 
     Args:
@@ -107,6 +108,8 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
         results: 各校验模块的统一结果。
         config: 用于补充配置哈希。
         generated_at: 可选生成时间，测试可注入固定值。
+        lineage_drift: 可选跨版本血缘漂移结果；缺省时输出空结构，旧解析方
+            仍可只读取原有字段，新增字段均为独立顶层键。
     Returns:
         可直接传给 Jinja2、也可序列化为 JSON 的字典。
     """
@@ -149,6 +152,7 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
         "samples": samples[:50],
         "suggestions": suggestions,
         "lineage_graph": lineage.get("graph", {}),
+        "lineage_drift": lineage_drift if isinstance(lineage_drift, dict) else {},
     }
 
 

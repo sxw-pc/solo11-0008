@@ -15,10 +15,17 @@ from .config import AppConfig
 from .parser.archive_loader import ArchiveError, SecurityError, load_archive
 from .parser.table_reader import TableReadError, read_manifest_table
 from .report.renderer import build_report_context, render_reports
+from .store.lineage_snapshot_store import LineageSnapshotStore
 from .store.sqlite_store import SQLiteStore
 from .validator.anomaly_check import validate_anomalies
 from .validator.hash_verify import compute_file_hashes, verify_hashes
 from .validator.lineage_check import LineageRuleError, load_lineage_rules, validate_lineage
+from .validator.lineage_drift import (LineageSnapshotError,
+                                      build_lineage_snapshot,
+                                      detect_lineage_drift,
+                                      first_version_drift,
+                                      lineage_domain_key,
+                                      unavailable_drift)
 from .validator.schema_check import ContractError, load_contract, validate_schema
 
 
@@ -101,6 +108,42 @@ def _read_tables(extraction: Any, config: AppConfig, sample: bool) -> tuple:
     return tables, errors
 
 
+def _collect_lineage_drift(config: AppConfig, lineage_result: Dict[str, Any],
+                           tables: Dict[str, Any],
+                           lineage_rules: Optional[Dict[str, Any]],
+                           task: Dict[str, Any]) -> Dict[str, Any]:
+    """保存当前血缘快照并与同业务契约的上一版本比对。
+
+    任何存储损坏、格式不兼容或写入失败都收敛为降级结果，绝不抛出异常，
+    保证血缘漂移能力不会影响单包校验主流程与现有报告生成。
+    """
+    lineage_key = lineage_domain_key(lineage_rules, task.get("lineage_name", ""))
+    try:
+        snapshot = build_lineage_snapshot(
+            lineage_result, tables, lineage_rules,
+            task_id=task["task_id"], packet_name=task["packet_name"],
+            created_at=task.get("uploaded_at"))
+        snapshot_store = LineageSnapshotStore(
+            config.db_path, max_versions=config.lineage_snapshot_versions)
+        previous = snapshot_store.get_latest_snapshot(lineage_key)
+        saved = snapshot_store.save_snapshot(snapshot)
+        if previous is None:
+            return first_version_drift(snapshot, current_meta=saved,
+                                       lineage_key=lineage_key)
+        baseline_payload, baseline_meta = previous
+        return detect_lineage_drift(snapshot, baseline_payload,
+                                    current_meta=saved,
+                                    baseline_meta=baseline_meta)
+    except LineageSnapshotError as exc:
+        return unavailable_drift(
+            "血缘历史快照读取失败，已降级为仅输出当前版本校验结果: %s" % exc,
+            code="lineage_snapshot_corrupt", lineage_key=lineage_key)
+    except Exception as exc:  # 存储层等未预期故障同样降级，阻断主流程是更严重的事故。
+        return unavailable_drift(
+            "血缘漂移检测不可用，已降级为仅输出当前版本校验结果: %s"
+            % exc, code="lineage_drift_error", lineage_key=lineage_key)
+
+
 def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
                    store: SQLiteStore, contract_path: Optional[Path] = None,
                    lineage_path: Optional[Path] = None,
@@ -150,6 +193,7 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
              "数据包: %s (%d 字节)" % (task["packet_name"], packet_size)]
     results: List[Dict[str, Any]] = []
     extraction = None
+    lineage_drift: Dict[str, Any] = {}
     unexpected = ""
     try:
         try:
@@ -195,10 +239,14 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
                 lineage_rules = load_lineage_rules(lineage_path)
                 lineage_result = validate_lineage(tables, lineage_rules)
             except LineageRuleError as exc:
+                lineage_rules = None
                 lineage_result = _error_result("lineage", "跨表血缘一致性校验",
                                                str(exc), "lineage_rule_error")
             results.append(lineage_result)
             lines.append("血缘校验: %s" % lineage_result["summary"])
+            lineage_drift = _collect_lineage_drift(
+                config, lineage_result, tables, lineage_rules, task)
+            lines.append("血缘漂移: %s" % lineage_drift["summary"])
             try:
                 anomaly_result = validate_anomalies(sampled_tables or tables, contract)
             except (NameError, UnboundLocalError):
@@ -226,7 +274,8 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
                                    if not item.get("passed"))[:500],
     })
     try:
-        report = build_report_context(task, results, config)
+        report = build_report_context(task, results, config,
+                                      lineage_drift=lineage_drift)
         report_paths = render_reports(report, config, task_id)
         task["report_md"] = _safe_relative(Path(report_paths["md"]), config.workspace_dir)
         task["report_html"] = _safe_relative(Path(report_paths["html"]), config.workspace_dir)
@@ -241,7 +290,7 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         lines.append(unexpected)
     log_path = _write_log(config, task_id, lines + ["任务结束: %s" % task["status"]])
     task["log_path"] = _safe_relative(log_path, config.workspace_dir)
-    task["result_json"] = {"results": results}
+    task["result_json"] = {"results": results, "lineage_drift": lineage_drift}
     if not report:
         task["error_summary"] = (task["error_summary"] + "；" + unexpected)[:500]
     store.update_task(
@@ -253,4 +302,4 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         result_json=task["result_json"],
     )
     return {"task": task, "results": results, "report": report,
-            "report_paths": report_paths}
+            "report_paths": report_paths, "lineage_drift": lineage_drift}

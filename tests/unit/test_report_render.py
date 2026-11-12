@@ -103,3 +103,64 @@ def test_issue_deduplication(config):
                             {"code": "hash_mismatch", "path": "a", "message": "m"}]}
     report = build_report_context(_task(), [duplicate], config)
     assert len(report["issues"]) == 1
+
+
+def test_lineage_drift_added_without_breaking_original_fields(config):
+    drift = {
+        "enabled": True, "degraded": False, "lineage_key": "trade_domain",
+        "baseline": {"version": 1, "task_id": "old", "packet_name": "v1.zip",
+                     "created_at": "2024-02-01T00:00:00"},
+        "current": {"version": 2, "task_id": "task001", "packet_name": "v2.zip",
+                    "created_at": "2024-03-01T00:00:00"},
+        "has_changes": True,
+        "changes": [{"type": "field_added", "target": "users.email",
+                     "detail": "字段新增", "before": None, "after": "email"}],
+        "counts": {"field_added": 1}, "summary": "检测到血缘漂移: 字段新增 1 处",
+    }
+    report = build_report_context(_task(), _results(), config, lineage_drift=drift)
+    # 原有字段结构保持不变，新增字段为独立顶层键。
+    assert report["lineage_drift"]["lineage_key"] == "trade_domain"
+    assert report["checks"][0]["name"]
+    assert report["lineage_graph"]["broken_nodes"] == ["a"]
+    paths = render_reports(report, config, "task001")
+    html = open(paths["html"], encoding="utf-8").read()
+    markdown = open(paths["md"], encoding="utf-8").read()
+    parsed = json.loads(open(paths["json"], encoding="utf-8").read())
+    assert "血缘版本漂移" in html and "users.email" in html
+    assert "血缘版本漂移" in markdown and "field_added" in markdown
+    assert parsed["lineage_drift"]["changes"][0]["target"] == "users.email"
+    assert parsed["task"]["task_id"] == "task001"
+    assert "http://" not in html and "https://" not in html
+
+
+def test_degraded_drift_rendered_with_warning(config):
+    drift = {
+        "enabled": True, "degraded": True, "lineage_key": "trade_domain",
+        "baseline": None, "current": {"version": 2, "task_id": "task001"},
+        "has_changes": False, "changes": [], "counts": {},
+        "summary": "血缘历史快照读取失败，已降级为仅输出当前版本校验结果",
+        "error": {"code": "lineage_snapshot_corrupt",
+                  "message": "血缘历史快照读取失败，已降级为仅输出当前版本校验结果"},
+    }
+    report = build_report_context(_task(), _results(), config, lineage_drift=drift)
+    paths = render_reports(report, config, "task001")
+    markdown = open(paths["md"], encoding="utf-8").read()
+    assert "降级" in markdown
+    parsed = json.loads(open(paths["json"], encoding="utf-8").read())
+    assert parsed["lineage_drift"]["degraded"] is True
+
+
+def test_missing_drift_defaults_to_empty_and_renders(config):
+    report = build_report_context(_task(), _results(), config)
+    assert report["lineage_drift"] == {}
+    paths = render_reports(report, config, "task001")
+    markdown = open(paths["md"], encoding="utf-8").read()
+    html = open(paths["html"], encoding="utf-8").read()
+    assert "未启用跨版本血缘漂移检测" in markdown
+    assert "未启用跨版本血缘漂移检测" in html
+
+
+def test_invalid_drift_type_ignored(config):
+    report = build_report_context(_task(), _results(), config,
+                                  lineage_drift="not-a-dict")
+    assert report["lineage_drift"] == {}

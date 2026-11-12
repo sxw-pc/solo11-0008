@@ -125,6 +125,39 @@
   <div class="empty">本次任务未配置血缘关联规则。</div>
   {% endif %}
 
+  <h2>血缘版本漂移</h2>
+  {% if report.lineage_drift and report.lineage_drift.enabled %}
+  <div class="meta">
+    <div><span class="muted">业务契约</span><br>{{ report.lineage_drift.lineage_key }}</div>
+    <div><span class="muted">漂移结论</span><br>{{ report.lineage_drift.summary }}</div>
+    {% if report.lineage_drift.baseline %}
+    <div><span class="muted">比对基线</span><br>v{{ report.lineage_drift.baseline.version }} · {{ report.lineage_drift.baseline.packet_name }}</div>
+    <div><span class="muted">当前版本</span><br>v{{ report.lineage_drift.current.version }}</div>
+    {% endif %}
+  </div>
+  {% if report.lineage_drift.degraded %}
+  <div class="empty">⚠ {{ report.lineage_drift.error.message }}，当前数据包血缘校验结果不受影响。</div>
+  {% endif %}
+  {% if report.lineage_drift.changes %}
+  <table>
+    <thead><tr><th>漂移类型</th><th>对象</th><th>说明</th><th>变更前</th><th>变更后</th></tr></thead>
+    <tbody>
+    {% for change in report.lineage_drift.changes %}
+      <tr>
+        <td class="mono">{{ change.type }}</td>
+        <td>{{ change.target }}</td>
+        <td>{{ change.detail }}</td>
+        <td class="mono">{{ change.before | tojson if change.before is not none else '-' }}</td>
+        <td class="mono">{{ change.after | tojson if change.after is not none else '-' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% else %}
+  <div class="empty">本次任务未启用跨版本血缘漂移检测。</div>
+  {% endif %}
+
   <h2>修复建议</h2>
   <ol>
     {% for suggestion in report.suggestions %}<li>{{ suggestion }}</li>{% endfor %}

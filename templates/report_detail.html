@@ -127,6 +127,36 @@
 </div>
 
 <section class="card">
+  <div class="card-head"><h2>血缘版本漂移</h2><span class="muted">与同业务契约上一版本快照比对</span></div>
+  {% if report.lineage_drift and report.lineage_drift.enabled %}
+    <p>{{ report.lineage_drift.summary }}</p>
+    {% if report.lineage_drift.degraded %}
+      <p class="risk-note">{{ report.lineage_drift.error.message }}</p>
+    {% endif %}
+    {% if report.lineage_drift.changes %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>漂移类型</th><th>对象</th><th>说明</th><th>变更前</th><th>变更后</th></tr></thead>
+        <tbody>
+        {% for change in report.lineage_drift.changes %}
+          <tr>
+            <td class="mono">{{ change.type }}</td>
+            <td>{{ change.target }}</td>
+            <td>{{ change.detail }}</td>
+            <td class="mono">{{ change.before | tojson if change.before is not none else '-' }}</td>
+            <td class="mono">{{ change.after | tojson if change.after is not none else '-' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  {% else %}
+    <div class="empty-state compact"><p>本次任务未启用跨版本血缘漂移检测。</p></div>
+  {% endif %}
+</section>
+
+<section class="card">
   <div class="card-head"><h2>血缘链路</h2><span class="muted">文本 + Mermaid 源码</span></div>
   {% if report.lineage_graph.text %}
     <pre class="code-block">{{ report.lineage_graph.text }}</pre>

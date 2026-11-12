@@ -49,6 +49,8 @@ class AppConfig:
     )
     allowed_extra_paths: tuple = ()
     log_level: str = "INFO"
+    # 同一业务契约下自动保留的最近血缘快照数量，超出后清理最旧非保护快照。
+    lineage_snapshot_versions: int = 30
 
     reports_dir: Path = field(init=False)
     uploads_dir: Path = field(init=False)
@@ -71,6 +73,8 @@ class AppConfig:
             raise ValueError("解压大小上限必须为正数")
         if int(self.max_archive_entries) <= 0:
             raise ValueError("压缩包条目上限必须为正数")
+        if int(self.lineage_snapshot_versions) < 1:
+            raise ValueError("血缘快照保留版本数必须为正整数")
         # 即使调用方传入软链接或相对路径，也统一固定在工作目录之下。
         self.reports_dir = self.workspace_dir / "reports"
         self.uploads_dir = self.workspace_dir / "uploads"

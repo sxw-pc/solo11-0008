@@ -65,6 +65,30 @@
 本次任务未配置血缘关联规则。
 {%- endif %}
 
+## 血缘版本漂移
+
+{% if report.lineage_drift and report.lineage_drift.enabled -%}
+- **业务契约**：{{ report.lineage_drift.lineage_key }}
+- **漂移结论**：{{ report.lineage_drift.summary }}
+{% if report.lineage_drift.baseline -%}
+- **比对基线**：v{{ report.lineage_drift.baseline.version }}（{{ report.lineage_drift.baseline.packet_name }}，{{ report.lineage_drift.baseline.created_at }}）
+- **当前版本**：v{{ report.lineage_drift.current.version }}
+{%- endif %}
+{% if report.lineage_drift.degraded -%}
+> ⚠ {{ report.lineage_drift.error.message }}，本报告仍完整保留当前数据包的血缘校验结果。
+{%- endif %}
+{% if report.lineage_drift.changes -%}
+
+| 漂移类型 | 对象 | 说明 | 变更前 | 变更后 |
+| --- | --- | --- | --- | --- |
+{% for change in report.lineage_drift.changes -%}
+| {{ change.type }} | {{ change.target }} | {{ change.detail }} | {{ change.before | tojson if change.before is not none else "-" }} | {{ change.after | tojson if change.after is not none else "-" }} |
+{% endfor %}
+{%- endif %}
+{%- else -%}
+本次任务未启用跨版本血缘漂移检测。
+{%- endif %}
+
 ## 修复建议
 
 {% for suggestion in report.suggestions -%}
