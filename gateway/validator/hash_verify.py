@@ -61,16 +61,22 @@ def _parse_expected_hash(expected: str) -> Dict[str, str]:
     raise ValueError("预期哈希格式不正确，应为 md5/sha256 摘要或 algo:digest")
 
 
-def verify_package_hash(package_path: Path, expected: str) -> Dict[str, Any]:
+def verify_package_hash(package_path: Path, expected: str,
+                        actual_hashes: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """校验压缩包自身哈希，供上传时可选填写预期值。
 
+    Args:
+        package_path: 压缩包路径。
+        expected: 预期哈希，支持 ``algo:digest`` 或裸摘要。
+        actual_hashes: 可选的预计算哈希（``compute_file_hashes`` 的结果），
+            传入后不再重复读取压缩包。
     Returns:
         包含 passed、algorithm、expected、actual 的结果字典。
     Raises:
         ValueError: 预期哈希格式非法。
     """
     parsed = _parse_expected_hash(expected)
-    actual = compute_file_hashes(package_path)
+    actual = actual_hashes if actual_hashes is not None else compute_file_hashes(package_path)
     errors = []
     for algorithm, digest in parsed.items():
         if actual[algorithm].lower() != digest:
@@ -92,7 +98,8 @@ def verify_package_hash(package_path: Path, expected: str) -> Dict[str, Any]:
 
 def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfig,
                   expected_package_hash: Optional[str] = None,
-                  package_path: Optional[Path] = None) -> Dict[str, Any]:
+                  package_path: Optional[Path] = None,
+                  package_hashes: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """对解压文件执行哈希、缺失、冗余与恶意文件校验。
 
     manifest.files 中键为相对路径，值至少包含 md5 或 sha256。未被声明且不在
@@ -104,6 +111,7 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
         config: 黑名单与白名单配置。
         expected_package_hash: 可选的压缩包预期哈希。
         package_path: 压缩包原始路径，用于包哈希校验。
+        package_hashes: 可选的压缩包预计算哈希，避免重复读取整包。
     Returns:
         统一格式的校验结果字典，含 errors 与 checked_files。
     """
@@ -178,7 +186,8 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
             })
         else:
             try:
-                package_result = verify_package_hash(package_path, expected_package_hash)
+                package_result = verify_package_hash(
+                    package_path, expected_package_hash, actual_hashes=package_hashes)
                 errors.extend(package_result["errors"])
             except ValueError as exc:
                 errors.append({"code": "invalid_expected_hash", "message": str(exc)})

@@ -150,10 +150,11 @@ test.bat
 | `max_content_length` | 1.5 GiB | 上传请求体上限 |
 | `blocked_extensions` | 内置列表 | 可执行/脚本扩展名 |
 | `allowed_extra_paths` | 空 | 允许的额外文件路径 |
+| `continue_on_failure` | `true` | 前置阶段失败后，Schema/血缘/异常抽检等非核心阶段是否继续执行；`false` 时记为“跳过”并终止 |
 
 ## 十、安全边界
 
-- 解压只写入 `workspace/tmp/gateway-*` 随机目录，结束或异常时自动清理。
+- 解压只写入 `workspace/tmp/gateway-*` 随机目录，结束或异常时自动清理；进程被终止时由退出钩子与信号处理器兜底，下次启动再按目录年龄清扫残留，不会误删在途任务的目录。
 - 上传副本只写入 `workspace/tmp/upload-*`，请求结束即删除。
 - 成员路径经 POSIX 规范化，拒绝 `..`、绝对路径、盘符、重复成员、符号/硬链接与设备文件。
 - 超过总量、单文件、条目数或压缩比阈值时，在解压前终止。

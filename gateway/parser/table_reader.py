@@ -196,6 +196,30 @@ def read_table(path: Path, source_format: str, config: AppConfig,
     return result
 
 
+def derive_sampled_table(source: TableData, config: AppConfig) -> TableData:
+    """从已读取的全量表在内存中派生抽样表，避免二次磁盘读取。
+
+    抽样算法、随机种子与元数据语义和 ``read_table(..., sample=True)``
+    完全一致，可直接替代“再次从磁盘读取并抽样”的旧流程。
+
+    Args:
+        source: ``sample=False`` 读取得到的全量表。
+        config: 提供抽样比例与随机种子。
+    Returns:
+        抽样后的新 TableData；源对象不被修改。
+    Raises:
+        TableReadError: 抽样失败。
+    """
+    sampled = _apply_sample(source.frame, config.sample_ratio, config.random_seed)
+    return TableData(
+        name=source.name, frame=sampled, source_format=source.source_format,
+        total_rows=source.total_rows, sampled_rows=len(sampled),
+        sample_ratio=(config.sample_ratio if len(sampled) < source.total_rows else 1.0),
+        encoding=source.encoding, sqlite_table=source.sqlite_table,
+        row_offset=source.row_offset,
+    )
+
+
 def read_manifest_table(extraction: ExtractionResult, table_name: str,
                         config: AppConfig, sample: bool = True) -> TableData:
     """依据 manifest.tables 中的映射读取表并检查文件路径。

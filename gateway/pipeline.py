@@ -1,19 +1,28 @@
 """单任务校验编排流水线。
 
-串联压缩包安全检查、哈希校验、表读取、Schema、血缘、异常规则与报告生成。
-任何安全或格式异常都会转化为结构化失败结果并持久化，不会导致 Web 服务崩溃。
+按固定顺序调度压缩包安全、完整性、表读取、Schema、血缘、异常抽检六个
+阶段。各阶段共享同一份解压目录与表数据：表文件只从磁盘读取一次，抽样
+表由全量表在内存中派生，整包哈希也只计算一次，避免重复磁盘 IO。
+
+默认配置下执行逻辑与历史串行实现完全一致；``continue_on_failure=False``
+时，任一前置阶段失败后非核心阶段记为“跳过”并终止。每个阶段的耗时、
+跳过状态与失败原因统一写入 SQLite 任务历史表（``stage_metrics`` 列）。
+临时解压目录由资源注册表兜底回收，进程异常终止也不会长期残留。
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+import time
 import traceback
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import __version__
 from .config import AppConfig
 from .parser.archive_loader import ArchiveError, SecurityError, load_archive
-from .parser.table_reader import TableReadError, read_manifest_table
+from .parser.table_reader import (TableData, TableReadError,
+                                  derive_sampled_table, read_manifest_table)
 from .report.renderer import build_report_context, render_reports
 from .store.sqlite_store import SQLiteStore
 from .validator.anomaly_check import validate_anomalies
@@ -34,16 +43,6 @@ def _error_result(key: str, name: str, message: str, code: str = "error") -> Dic
         "summary": message, "errors": [{"code": code, "message": message}],
         "samples": [],
     }
-
-
-def _skipped_results(reason: str) -> List[Dict[str, Any]]:
-    """当压缩包不可安全解压时，为其余校验项生成跳过占位。"""
-    return [
-        _error_result("hash", "文件完整性与哈希校验", "跳过：%s" % reason, "skipped"),
-        _error_result("schema", "数据契约 Schema 校验", "跳过：%s" % reason, "skipped"),
-        _error_result("lineage", "跨表血缘一致性校验", "跳过：%s" % reason, "skipped"),
-        _error_result("anomaly", "异常值抽检规则校验", "跳过：%s" % reason, "skipped"),
-    ]
 
 
 def _archive_result(extraction: Any) -> Dict[str, Any]:
@@ -87,18 +86,215 @@ def _write_log(config: AppConfig, task_id: str, lines: List[str]) -> Path:
     return path
 
 
-def _read_tables(extraction: Any, config: AppConfig, sample: bool) -> tuple:
-    """读取 manifest 声明的全部表，返回表映射和失败明细。"""
-    tables = {}
-    errors = []
-    for table_name in (extraction.manifest.get("tables") or {}).keys():
+@dataclass
+class _StageContext:
+    """跨阶段共享的校验上下文。
+
+    解压目录、全量表、抽样表与契约只加载一次，后续阶段直接复用，
+    不再各自读取磁盘。
+    """
+
+    config: AppConfig
+    packet_path: Path
+    contract_path: Path
+    lineage_path: Path
+    expected_package_hash: Optional[str]
+    packet_hashes: Dict[str, str]
+    log_lines: List[str]
+    extraction: Any = None
+    tables: Dict[str, TableData] = field(default_factory=dict)
+    sampled_tables: Dict[str, TableData] = field(default_factory=dict)
+    contract: Optional[Dict[str, Any]] = None
+
+
+def _stage_archive(ctx: _StageContext) -> Dict[str, Any]:
+    """阶段一：压缩包安全与结构检查，产出共享解压目录。"""
+    try:
+        ctx.extraction = load_archive(ctx.packet_path, ctx.config)
+    except (SecurityError, ArchiveError) as exc:
+        ctx.log_lines.append("压缩包安全检查失败: %s" % exc)
+        return _archive_error_result(exc)
+    ctx.log_lines.append("压缩包安全检查通过: %s" % ctx.extraction.archive_type)
+    return _archive_result(ctx.extraction)
+
+
+def _stage_hash(ctx: _StageContext) -> Dict[str, Any]:
+    """阶段二：文件完整性与哈希校验，复用已计算的整包哈希。"""
+    package_hashes = ctx.packet_hashes if ctx.packet_hashes.get("sha256") else None
+    result = verify_hashes(
+        ctx.extraction.temp_dir, ctx.extraction.manifest, ctx.config,
+        expected_package_hash=ctx.expected_package_hash,
+        package_path=ctx.packet_path, package_hashes=package_hashes)
+    ctx.log_lines.append("哈希校验: %s" % result["summary"])
+    return result
+
+
+def _stage_table_read(ctx: _StageContext) -> Dict[str, Any]:
+    """阶段三：结构化表读取适配。
+
+    每张表只从磁盘读取一次（全量），抽样表由全量表在内存中派生；
+    读取失败的表在抽样阶段按旧行为记录同样的错误。
+    """
+    tables: Dict[str, TableData] = {}
+    read_errors: List[Dict[str, Any]] = []
+    table_names = [str(name)
+                   for name in (ctx.extraction.manifest.get("tables") or {}).keys()]
+    for table_name in table_names:
         try:
-            tables[str(table_name)] = read_manifest_table(
-                extraction, str(table_name), config, sample=sample)
+            tables[table_name] = read_manifest_table(
+                ctx.extraction, table_name, ctx.config, sample=False)
         except TableReadError as exc:
-            errors.append({"code": "table_read_error", "table": str(table_name),
-                           "message": str(exc)})
-    return tables, errors
+            read_errors.append({"code": "table_read_error", "table": table_name,
+                                "message": str(exc)})
+    sampled: Dict[str, TableData] = {}
+    sample_errors: List[Dict[str, Any]] = []
+    for table_name in table_names:
+        source = tables.get(table_name)
+        if source is None:
+            # 与旧实现一致：完整读取失败的表在抽样读取时会再次失败，
+            # 错误内容相同，这里直接复用，避免无意义的二次磁盘读取。
+            sample_errors.extend(dict(item) for item in read_errors
+                                 if item["table"] == table_name)
+            continue
+        try:
+            sampled[table_name] = derive_sampled_table(source, ctx.config)
+        except TableReadError as exc:
+            sample_errors.append({"code": "table_read_error", "table": table_name,
+                                  "message": str(exc)})
+    ctx.tables = tables
+    ctx.sampled_tables = sampled
+    if read_errors or not tables:
+        result = _error_result(
+            "table_read", "结构化表读取适配",
+            "表读取失败: " + "；".join(item["message"] for item in read_errors[:3])
+            if read_errors else "manifest 未声明任何业务表", "table_read_error")
+        result["errors"] = read_errors + sample_errors
+        return result
+    return {
+        "key": "table_read", "name": "结构化表读取适配", "passed": True,
+        "summary": "成功读取 %d 张表（血缘使用全量，规则校验使用抽样）"
+                   % len(tables), "errors": [], "samples": [],
+    }
+
+
+def _stage_schema(ctx: _StageContext) -> Dict[str, Any]:
+    """阶段四：数据契约 Schema 校验（使用抽样表）。"""
+    try:
+        ctx.contract = load_contract(ctx.contract_path)
+        result = validate_schema(ctx.sampled_tables or ctx.tables, ctx.contract)
+    except ContractError as exc:
+        result = _error_result("schema", "数据契约 Schema 校验",
+                               str(exc), "contract_error")
+    ctx.log_lines.append("Schema 校验: %s" % result["summary"])
+    return result
+
+
+def _stage_lineage(ctx: _StageContext) -> Dict[str, Any]:
+    """阶段五：跨表血缘一致性校验（使用全量表）。"""
+    try:
+        lineage_rules = load_lineage_rules(ctx.lineage_path)
+        result = validate_lineage(ctx.tables, lineage_rules)
+    except LineageRuleError as exc:
+        result = _error_result("lineage", "跨表血缘一致性校验",
+                               str(exc), "lineage_rule_error")
+    ctx.log_lines.append("血缘校验: %s" % result["summary"])
+    return result
+
+
+def _stage_anomaly(ctx: _StageContext) -> Dict[str, Any]:
+    """阶段六：异常值抽检规则校验（使用抽样表与已加载契约）。"""
+    if ctx.contract is None:
+        # 契约加载失败时旧实现依赖未绑定变量触发 NameError，这里显式判断，
+        # 输出与旧实现完全一致的结果。
+        result = _error_result("anomaly", "异常值抽检规则校验",
+                               "契约加载失败，无法执行异常规则", "contract_error")
+    else:
+        try:
+            result = validate_anomalies(ctx.sampled_tables or ctx.tables, ctx.contract)
+        except (NameError, UnboundLocalError):
+            result = _error_result("anomaly", "异常值抽检规则校验",
+                                   "契约加载失败，无法执行异常规则", "contract_error")
+    ctx.log_lines.append("异常抽检: %s" % result["summary"])
+    return result
+
+
+#: 阶段定义：(key, 名称, 是否核心阶段, 执行函数)。核心阶段产出共享资源，
+#: 始终执行；非核心阶段受 continue_on_failure 配置控制。
+_STAGES: Tuple[Tuple[str, str, bool, Callable[[_StageContext], Dict[str, Any]]], ...] = (
+    ("archive", "压缩包安全与结构检查", True, _stage_archive),
+    ("hash", "文件完整性与哈希校验", True, _stage_hash),
+    ("table_read", "结构化表读取适配", True, _stage_table_read),
+    ("schema", "数据契约 Schema 校验", False, _stage_schema),
+    ("lineage", "跨表血缘一致性校验", False, _stage_lineage),
+    ("anomaly", "异常值抽检规则校验", False, _stage_anomaly),
+)
+
+#: 压缩包安全检查未通过时需要生成跳过占位结果的阶段（与旧实现一致，
+#: table_read 不生成占位结果）。
+_ARCHIVE_GATE_SKIPPED = ("hash", "schema", "lineage", "anomaly")
+
+
+def _metric_entry(key: str, name: str, status: str, duration: float,
+                  error_summary: str = "") -> Dict[str, Any]:
+    """生成单阶段指标记录。"""
+    return {
+        "key": key, "name": name, "status": status,
+        "duration_seconds": round(duration, 3),
+        "error_summary": str(error_summary)[:500],
+    }
+
+
+def _fill_unexecuted_metrics(metrics: List[Dict[str, Any]], reason: str) -> None:
+    """为未执行的阶段补齐跳过指标，保证指标覆盖全部阶段。"""
+    executed = {item["key"] for item in metrics}
+    for key, name, _core, _func in _STAGES:
+        if key not in executed:
+            metrics.append(_metric_entry(key, name, "skipped", 0.0, reason))
+
+
+def _run_stages(ctx: _StageContext, results: List[Dict[str, Any]],
+                metrics: List[Dict[str, Any]]) -> None:
+    """按固定顺序执行各阶段，结果与指标就地追加到给定列表。
+
+    默认配置下与旧串行实现一致：压缩包安全检查未通过时后续阶段记为跳过，
+    其余阶段失败不阻断后续。``continue_on_failure=False`` 时，任一前置
+    阶段失败后非核心阶段记为跳过。未捕获异常会记录当前阶段指标后继续
+    向上抛出，由外层统一转换为内部错误结果。
+    """
+    archive_failed = False
+    any_failed = False
+    for key, name, core, func in _STAGES:
+        if archive_failed:
+            if key in _ARCHIVE_GATE_SKIPPED:
+                results.append(_error_result(
+                    key, name, "跳过：压缩包安全检查未通过", "skipped"))
+            metrics.append(_metric_entry(key, name, "skipped", 0.0,
+                                         "压缩包安全检查未通过"))
+            continue
+        if not core and any_failed and not ctx.config.continue_on_failure:
+            reason = "前置校验阶段未通过"
+            results.append(_error_result(key, name, "跳过：%s" % reason, "skipped"))
+            ctx.log_lines.append("阶段跳过: %s（%s）" % (name, reason))
+            metrics.append(_metric_entry(key, name, "skipped", 0.0, reason))
+            continue
+        started = time.perf_counter()
+        try:
+            result = func(ctx)
+        except Exception as exc:
+            metrics.append(_metric_entry(
+                key, name, "failed", time.perf_counter() - started,
+                "%s: %s" % (type(exc).__name__, exc)))
+            raise
+        results.append(result)
+        passed = bool(result.get("passed"))
+        metrics.append(_metric_entry(
+            key, name, "passed" if passed else "failed",
+            time.perf_counter() - started,
+            "" if passed else result.get("summary", "")))
+        if not passed:
+            any_failed = True
+        if key == "archive" and ctx.extraction is None:
+            archive_failed = True
 
 
 def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
@@ -118,7 +314,7 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         expected_package_hash: 可选整包 MD5/SHA256。
         task_id: 测试可注入任务 ID；默认生成 UUID。
     Returns:
-        含 task、results、report、report_paths 的字典。
+        含 task、results、report、report_paths、stage_metrics 的字典。
     """
     packet_path = Path(packet_path).resolve()
     task_id = task_id or uuid.uuid4().hex[:16]
@@ -149,72 +345,25 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
     lines = ["[%s] 任务 %s 开始" % (uploaded_at, task_id),
              "数据包: %s (%d 字节)" % (task["packet_name"], packet_size)]
     results: List[Dict[str, Any]] = []
-    extraction = None
+    ctx = _StageContext(
+        config=config, packet_path=packet_path, contract_path=contract_path,
+        lineage_path=lineage_path, expected_package_hash=expected_package_hash,
+        packet_hashes=packet_hashes, log_lines=lines)
+    stage_metrics: List[Dict[str, Any]] = []
     unexpected = ""
     try:
-        try:
-            extraction = load_archive(packet_path, config)
-            task["archive_type"] = extraction.archive_type
-            results.append(_archive_result(extraction))
-            lines.append("压缩包安全检查通过: %s" % extraction.archive_type)
-        except (SecurityError, ArchiveError) as exc:
-            results.append(_archive_error_result(exc))
-            results.extend(_skipped_results("压缩包安全检查未通过"))
-            lines.append("压缩包安全检查失败: %s" % exc)
-        if extraction is not None:
-            hash_result = verify_hashes(
-                extraction.temp_dir, extraction.manifest, config,
-                expected_package_hash=expected_package_hash, package_path=packet_path)
-            results.append(hash_result)
-            lines.append("哈希校验: %s" % hash_result["summary"])
-            tables, read_errors = _read_tables(extraction, config, sample=False)
-            if read_errors or not tables:
-                read_result = _error_result(
-                    "table_read", "结构化表读取适配",
-                    "表读取失败: " + "；".join(item["message"] for item in read_errors[:3])
-                    if read_errors else "manifest 未声明任何业务表", "table_read_error")
-                read_result["errors"] = read_errors
-                results.append(read_result)
-            else:
-                results.append({
-                    "key": "table_read", "name": "结构化表读取适配", "passed": True,
-                    "summary": "成功读取 %d 张表（血缘使用全量，规则校验使用抽样）"
-                               % len(tables), "errors": [], "samples": [],
-                })
-            sampled_tables, sample_errors = _read_tables(extraction, config, sample=True)
-            read_errors.extend(sample_errors)
-            try:
-                contract = load_contract(contract_path)
-                schema_result = validate_schema(sampled_tables or tables, contract)
-            except ContractError as exc:
-                schema_result = _error_result("schema", "数据契约 Schema 校验",
-                                              str(exc), "contract_error")
-            results.append(schema_result)
-            lines.append("Schema 校验: %s" % schema_result["summary"])
-            try:
-                lineage_rules = load_lineage_rules(lineage_path)
-                lineage_result = validate_lineage(tables, lineage_rules)
-            except LineageRuleError as exc:
-                lineage_result = _error_result("lineage", "跨表血缘一致性校验",
-                                               str(exc), "lineage_rule_error")
-            results.append(lineage_result)
-            lines.append("血缘校验: %s" % lineage_result["summary"])
-            try:
-                anomaly_result = validate_anomalies(sampled_tables or tables, contract)
-            except (NameError, UnboundLocalError):
-                anomaly_result = _error_result(
-                    "anomaly", "异常值抽检规则校验",
-                    "契约加载失败，无法执行异常规则", "contract_error")
-            results.append(anomaly_result)
-            lines.append("异常抽检: %s" % anomaly_result["summary"])
+        _run_stages(ctx, results, stage_metrics)
     except Exception as exc:  # 保证异常不会穿透 Web 请求，同时记录完整本地日志。
         unexpected = "%s: %s" % (type(exc).__name__, exc)
         results.append(_error_result("internal", "校验流水线", "内部异常: %s" % unexpected))
         lines.append("流水线异常:\n" + traceback.format_exc())
+        _fill_unexecuted_metrics(stage_metrics, "流水线内部异常终止")
     finally:
-        if extraction is not None:
-            extraction.cleanup()
+        if ctx.extraction is not None:
+            ctx.extraction.cleanup()
             lines.append("临时解压目录已清理")
+    if ctx.extraction is not None:
+        task["archive_type"] = ctx.extraction.archive_type
     passed = bool(results) and all(item.get("passed") for item in results) and not unexpected
     finished = datetime.now()
     duration = round((finished - started).total_seconds(), 3)
@@ -250,7 +399,7 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         duration_seconds=task["duration_seconds"], error_summary=task["error_summary"],
         report_md=task["report_md"], report_html=task["report_html"],
         report_json=task["report_json"], log_path=task["log_path"],
-        result_json=task["result_json"],
+        result_json=task["result_json"], stage_metrics=stage_metrics,
     )
     return {"task": task, "results": results, "report": report,
-            "report_paths": report_paths}
+            "report_paths": report_paths, "stage_metrics": stage_metrics}

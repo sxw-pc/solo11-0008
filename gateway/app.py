@@ -18,6 +18,7 @@ from . import __version__
 from .config import PROJECT_ROOT, AppConfig, load_config
 from .pipeline import run_validation
 from .report.renderer import build_report_context
+from .resource import install_signal_cleanup, sweep_stale_temp_dirs
 from .store.sqlite_store import SQLiteStore
 
 _PRESETS = {
@@ -104,6 +105,10 @@ def create_app(config: Optional[AppConfig] = None,
     store = SQLiteStore(config.db_path)
     app.extensions["gateway_config"] = config
     app.extensions["gateway_store"] = store
+    # 安装终止信号清理钩子，并清扫上次异常退出遗留的过期临时目录；
+    # 只处理超龄且未被任何在途任务登记的 gateway-* 目录，不影响并发任务。
+    install_signal_cleanup()
+    sweep_stale_temp_dirs(config.temp_dir)
 
     @app.after_request
     def security_headers(response: Any) -> Any:

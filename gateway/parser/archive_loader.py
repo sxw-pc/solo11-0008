@@ -18,6 +18,7 @@ import zipfile
 import yaml
 
 from ..config import AppConfig
+from ..resource import REGISTRY
 
 if sys.platform.startswith("win"):  # Windows 缺少 libmagic，导入可能阻塞。
     _magic = None
@@ -64,10 +65,11 @@ class ExtractionResult:
         return _safe_join(self.temp_dir, relative)
 
     def cleanup(self) -> None:
-        """删除临时解压目录；重复调用安全。"""
+        """删除临时解压目录并注销登记；重复调用安全。"""
         if not self._cleaned:
             shutil.rmtree(self.temp_dir, ignore_errors=True)
             self._cleaned = True
+        REGISTRY.unregister(self.temp_dir)
 
     def __enter__(self) -> "ExtractionResult":
         """支持 with 语句自动清理。"""
@@ -76,6 +78,13 @@ class ExtractionResult:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         """退出上下文时清理临时文件。"""
         self.cleanup()
+
+    def __del__(self) -> None:
+        """对象被回收时尽力清理，防止异常路径遗漏临时目录。"""
+        try:
+            self.cleanup()
+        except Exception:  # 解释器退出阶段模块可能已部分卸载。
+            pass
 
 
 def _safe_join(root: Path, relative: str) -> Path:
@@ -300,6 +309,8 @@ def load_archive(path: Path, config: AppConfig) -> ExtractionResult:
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise
+    # 解压成功后才登记，由 cleanup/atexit/信号处理器兜底回收。
+    REGISTRY.register(temp_dir)
     return ExtractionResult(
         temp_dir=temp_dir,
         archive_type=archive_type,

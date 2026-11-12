@@ -49,6 +49,10 @@ class AppConfig:
     )
     allowed_extra_paths: tuple = ()
     log_level: str = "INFO"
+    # 非核心阶段（Schema/血缘/异常抽检）在前置阶段失败后是否继续执行。
+    # 默认 True，与历史串行实现的行为完全一致；置 False 时前置阶段一旦
+    # 不通过，后续非核心阶段记为“跳过”并直接终止。
+    continue_on_failure: bool = True
 
     reports_dir: Path = field(init=False)
     uploads_dir: Path = field(init=False)
@@ -71,6 +75,8 @@ class AppConfig:
             raise ValueError("解压大小上限必须为正数")
         if int(self.max_archive_entries) <= 0:
             raise ValueError("压缩包条目上限必须为正数")
+        if not isinstance(self.continue_on_failure, bool):
+            raise ValueError("continue_on_failure 必须为布尔值")
         # 即使调用方传入软链接或相对路径，也统一固定在工作目录之下。
         self.reports_dir = self.workspace_dir / "reports"
         self.uploads_dir = self.workspace_dir / "uploads"

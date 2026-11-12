@@ -16,7 +16,7 @@ _COLUMNS = (
     "uploaded_at", "finished_at", "status", "passed", "contract_name",
     "lineage_name", "duration_seconds", "config_hash", "tool_version",
     "error_summary", "report_md", "report_html", "report_json", "log_path",
-    "result_json",
+    "result_json", "stage_metrics",
 )
 _UPDATABLE = set(_COLUMNS) - {"task_id"}
 
@@ -47,7 +47,7 @@ class SQLiteStore:
             connection.close()
 
     def init_db(self) -> None:
-        """创建任务表与常用筛选索引，可重复执行。"""
+        """创建任务表与常用筛选索引，并迁移存量库缺失的列，可重复执行。"""
         with self._connection() as connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -70,21 +70,31 @@ class SQLiteStore:
                     report_html TEXT NOT NULL DEFAULT '',
                     report_json TEXT NOT NULL DEFAULT '',
                     log_path TEXT NOT NULL DEFAULT '',
-                    result_json TEXT NOT NULL DEFAULT '{}'
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    stage_metrics TEXT NOT NULL DEFAULT '[]'
                 )
             """)
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time "
                                "ON tasks(uploaded_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status "
                                "ON tasks(status)")
+            self._migrate(connection)
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        """为旧版本数据库补充缺失的列，保证存量数据平滑升级。"""
+        existing = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+        if "stage_metrics" not in existing:
+            connection.execute(
+                "ALTER TABLE tasks ADD COLUMN stage_metrics TEXT NOT NULL DEFAULT '[]'")
 
     @staticmethod
     def _serialize(task: Dict[str, Any]) -> Dict[str, Any]:
         """把字典/列表结果序列化为 JSON 字符串。"""
         values = dict(task)
-        if "result_json" in values and not isinstance(values["result_json"], str):
-            values["result_json"] = json.dumps(
-                values["result_json"], ensure_ascii=False, default=str)
+        for key in ("result_json", "stage_metrics"):
+            if key in values and not isinstance(values[key], str):
+                values[key] = json.dumps(values[key], ensure_ascii=False, default=str)
         return values
 
     def create_task(self, task: Dict[str, Any]) -> str:
@@ -99,6 +109,7 @@ class SQLiteStore:
         row["status"] = row.get("status") or "running"
         row["uploaded_at"] = row.get("uploaded_at") or datetime.now().isoformat(timespec="seconds")
         row["result_json"] = row.get("result_json") or "{}"
+        row["stage_metrics"] = row.get("stage_metrics") or "[]"
         row["duration_seconds"] = float(row.get("duration_seconds") or 0)
         for name in _COLUMNS:
             if row.get(name) is None and name not in ("finished_at",):
@@ -116,9 +127,9 @@ class SQLiteStore:
         updates = {key: value for key, value in fields.items() if key in _UPDATABLE}
         if not updates:
             return False
-        if "result_json" in updates and not isinstance(updates["result_json"], str):
-            updates["result_json"] = json.dumps(
-                updates["result_json"], ensure_ascii=False, default=str)
+        for key in ("result_json", "stage_metrics"):
+            if key in updates and not isinstance(updates[key], str):
+                updates[key] = json.dumps(updates[key], ensure_ascii=False, default=str)
         if "passed" in updates:
             updates["passed"] = 1 if updates["passed"] else 0
         assignments = ", ".join("%s = ?" % key for key in updates)
@@ -130,13 +141,17 @@ class SQLiteStore:
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
-        """将数据库行转换为含解析后 result 的字典。"""
+        """将数据库行转换为含解析后 result 与阶段指标的字典。"""
         item = dict(row)
         item["passed"] = bool(item.get("passed"))
         try:
             item["result"] = json.loads(item.get("result_json") or "{}")
         except (ValueError, TypeError):
             item["result"] = {}
+        try:
+            item["stages"] = json.loads(item.get("stage_metrics") or "[]")
+        except (ValueError, TypeError):
+            item["stages"] = []
         return item
 
     def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
