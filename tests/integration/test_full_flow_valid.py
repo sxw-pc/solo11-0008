@@ -2,6 +2,10 @@
 
 from hashlib import sha256
 from pathlib import Path
+import shutil
+import zipfile
+
+import yaml
 
 from gateway.app import create_app
 from gateway.pipeline import run_validation
@@ -91,3 +95,47 @@ def test_empty_upload_and_filters(config):
     assert client.get("/healthz").json["status"] == "ok"
     assert client.get("/missing").status_code == 404
     assert client.get("/tasks/not-found").status_code == 404
+
+
+def _make_manifest_variant(work_dir, packet, tamper=False):
+    """把合法包重打包，manifest 路径改为反斜杠/大小写变体。"""
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    source = work_dir / "source"
+    with zipfile.ZipFile(packet) as archive:
+        archive.extractall(source)
+    manifest = yaml.safe_load((source / "manifest.yaml").read_text(encoding="utf-8"))
+    renamed = {}
+    for key, value in manifest["files"].items():
+        new_key = "DATA\\Users.CSV" if key == "data/users.csv" else key.replace("/", "\\")
+        renamed[new_key] = value
+    manifest["files"] = renamed
+    for spec in manifest["tables"].values():
+        spec["path"] = ("DATA\\Users.CSV" if spec["path"] == "data/users.csv"
+                        else spec["path"].replace("/", "\\"))
+    if tamper:
+        manifest["files"]["data\\trades.csv"]["sha256"] = "0" * 64
+    (source / "manifest.yaml").write_text(
+        yaml.safe_dump(manifest, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    target = work_dir / "variant.zip"
+    with zipfile.ZipFile(target, "w") as archive:
+        for path in sorted(source.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(source).as_posix())
+    shutil.rmtree(source)
+    return target
+
+
+def test_manifest_path_variants_pass_and_tamper_blocked(tmp_path, config, store):
+    """反斜杠/大小写路径写法应视为合法，篡改与真实缺失仍被拦截。"""
+    packet = VALID_PACKETS[0]
+    variant = _make_manifest_variant(tmp_path / "good", packet)
+    outcome = run_validation(variant, variant.name, config, store)
+    assert outcome["task"]["status"] == "passed"
+    assert all(item["passed"] for item in outcome["results"])
+    tampered = _make_manifest_variant(tmp_path / "tampered", packet, tamper=True)
+    bad = run_validation(tampered, tampered.name, config, store)
+    assert bad["task"]["status"] == "failed"
+    hash_result = next(item for item in bad["results"] if item["key"] == "hash")
+    assert "hash_mismatch" in hash_result["error_codes"]
+    assert not list(config.temp_dir.iterdir())

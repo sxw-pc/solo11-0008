@@ -45,6 +45,7 @@
   <section class="grid">
     <div class="stat"><span class="muted">总体结论</span>
       {% if report.overall_passed %}<strong class="pass">通过</strong>{% else %}<strong class="fail">不通过</strong>{% endif %}
+      <div class="muted">任务状态：{{ report.status }} · 配置哈希 {{ report.meta.config_hash }}</div>
     </div>
     <div class="stat"><span class="muted">校验项通过率</span><strong>{{ report.pass_rate }}%</strong></div>
     <div class="stat"><span class="muted">问题数量</span><strong>{{ report.issues|length }}</strong></div>

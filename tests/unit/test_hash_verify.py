@@ -74,6 +74,41 @@ def test_missing_and_bad_declarations(tmp_path, config):
     assert "missing_hash_declaration" in missing["error_codes"]
 
 
+def test_manifest_path_normalization_matches(tmp_path, config):
+    """反斜杠与大小写差异应匹配实际文件，真实缺失与篡改仍被拦截。"""
+    root = tmp_path / "root"
+    (root / "data").mkdir(parents=True)
+    data = root / "data" / "users.csv"
+    data.write_text("id\n1\n", encoding="utf-8")
+    digest = {"md5": md5(data.read_bytes()).hexdigest(),
+              "sha256": sha256(data.read_bytes()).hexdigest()}
+    matched = verify_hashes(root, {"files": {"DATA\\Users.CSV": digest},
+                                   "tables": {}}, config)
+    assert matched["passed"], matched["errors"]
+    tampered = dict(digest, sha256="0" * 64)
+    wrong = verify_hashes(root, {"files": {"DATA\\Users.CSV": tampered},
+                                 "tables": {}}, config)
+    assert wrong["error_codes"] == ["hash_mismatch"]
+    missing = verify_hashes(root, {"files": {"DATA\\Other.CSV": digest},
+                                   "tables": {}}, config)
+    assert "missing_file" in missing["error_codes"]
+    assert "redundant_file" in missing["error_codes"]
+
+
+def test_manifest_case_conflict_and_invalid_path(tmp_path, config):
+    root = tmp_path / "root"
+    root.mkdir()
+    data = root / "a.csv"
+    data.write_text("id\n1\n", encoding="utf-8")
+    digest = {"sha256": sha256(data.read_bytes()).hexdigest()}
+    result = verify_hashes(root, {"files": {"a.csv": digest, "A.CSV": digest},
+                                  "tables": {}}, config)
+    assert "case_conflict" in result["error_codes"]
+    invalid = verify_hashes(root, {"files": {"../evil.csv": digest},
+                                   "tables": {}}, config)
+    assert "invalid_manifest_path" in invalid["error_codes"]
+
+
 def test_whitelist_extra_file(tmp_path, config):
     root = tmp_path / "root"
     root.mkdir()

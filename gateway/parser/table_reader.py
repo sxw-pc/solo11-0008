@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from ..config import AppConfig
-from .archive_loader import ExtractionResult
+from .archive_loader import ExtractionResult, SecurityError
 
 
 class TableReadError(Exception):
@@ -200,6 +200,9 @@ def read_manifest_table(extraction: ExtractionResult, table_name: str,
                         config: AppConfig, sample: bool = True) -> TableData:
     """依据 manifest.tables 中的映射读取表并检查文件路径。
 
+    路径先按包内实际成员做规范化（反斜杠、``./`` 前缀与大小写差异）再定位，
+    从而与哈希校验使用同一份映射；无法解析到实际成员时按缺失文件报错。
+
     Raises:
         TableReadError: 表未声明、路径越界或读取失败。
     """
@@ -211,9 +214,12 @@ def read_manifest_table(extraction: ExtractionResult, table_name: str,
     if not relative:
         raise TableReadError("manifest 表 %s 缺少 path" % table_name)
     try:
-        path = extraction.safe_path(str(relative))
-    except Exception as exc:
+        resolved = extraction.resolve_relative(str(relative))
+    except SecurityError as exc:
         raise TableReadError("表路径非法: %s" % relative) from exc
+    if resolved is None:
+        raise TableReadError("表文件不存在: %s" % relative)
+    path = extraction.safe_path(resolved)
     fmt = str(spec.get("format") or path.suffix.lstrip(".")).lower()
     return read_table(
         path=path, source_format=fmt, config=config, name=table_name,

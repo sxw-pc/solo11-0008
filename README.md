@@ -22,11 +22,11 @@
 | 模块 | 能力 |
 | --- | --- |
 | 压缩包安全 | zip/tar.gz、路径规范化、拒绝越界/绝对路径/链接/设备文件、条目数限制、解压总量与单文件限制、压缩比检测、重复成员拦截、加密包拦截 |
-| 完整性校验 | 逐文件 MD5/SHA256、manifest 声明文件核对、冗余文件检测、可选整包哈希、危险扩展名黑名单与白名单例外 |
+| 完整性校验 | 逐文件 MD5/SHA256、manifest 声明文件核对、冗余文件检测、可选整包哈希、危险扩展名黑名单与白名单例外；manifest 路径统一反斜杠、`./` 与大小写后比对 |
 | Schema 校验 | JSON Schema Draft 7、字段缺失、多余字段、类型、required、nullable、enum、minimum/maximum、pattern、minLength/maxLength、format、别名映射 |
 | 血缘校验 | 一对多、多对一、一对一；空引用、孤立记录、被引用键缺失、基数异常；跨 csv/parquet/sqlite 键规范化；文字与 Mermaid 链路图 |
 | 异常抽检 | range、regex、date、null_rate、duplicate_rate、受控 custom 函数；确定性抽样；阈值与异常率；Top20 样例 |
-| 报告与历史 | Markdown/HTML/JSON；HTML 单文件内联样式；配置指纹与工具版本；SQLite 任务历史、筛选、删除 |
+| 报告与历史 | Markdown/HTML/JSON；HTML 单文件内联样式；配置指纹与工具版本；历史/详情/报告状态一致；原子写入；SQLite 任务历史、筛选、删除 |
 | 安全运行 | 仅回环监听、上传临时目录隔离、自动清理、CSP/X-Frame-Options/nosniff、报告路径越界防护 |
 
 ## 三、目录结构
@@ -155,7 +155,7 @@ test.bat
 
 - 解压只写入 `workspace/tmp/gateway-*` 随机目录，结束或异常时自动清理。
 - 上传副本只写入 `workspace/tmp/upload-*`，请求结束即删除。
-- 成员路径经 POSIX 规范化，拒绝 `..`、绝对路径、盘符、重复成员、符号/硬链接与设备文件。
+- 成员路径经 POSIX 规范化，拒绝 `..`、绝对路径、盘符、重复成员、符号/硬链接与设备文件，并拒绝仅大小写不同的重复成员。
 - 超过总量、单文件、条目数或压缩比阈值时，在解压前终止。
 - 报告下载与日志预览均校验路径必须位于对应工作子目录。
 - 自定义异常规则只从 `gateway/validator/custom_rules.py` 的白名单加载，不执行上传代码。

@@ -116,6 +116,19 @@ def test_read_manifest_table_and_specs(config):
         extraction.manifest["tables"]["nopath"] = {"format": "csv"}
         with pytest.raises(TableReadError, match="缺少 path"):
             read_manifest_table(extraction, "nopath", config)
+        extraction.manifest["tables"]["absent"] = {"path": "data/absent.csv"}
+        with pytest.raises(TableReadError, match="不存在"):
+            read_manifest_table(extraction, "absent", config)
+    finally:
+        extraction.cleanup()
+
+
+def test_read_manifest_table_normalizes_path(config):
+    extraction = load_archive(Path("fixtures/valid_packets/retail_valid_a.zip"), config)
+    try:
+        extraction.manifest["tables"]["users"]["path"] = "DATA\\USERS.CSV"
+        table = read_manifest_table(extraction, "users", config, sample=False)
+        assert len(table.frame) == 24
     finally:
         extraction.cleanup()
 

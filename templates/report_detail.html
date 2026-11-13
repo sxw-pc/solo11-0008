@@ -40,7 +40,7 @@
       <dt>整包 SHA256</dt><dd class="break mono">{{ task.packet_sha256 or '-' }}</dd>
       <dt>契约文件</dt><dd>{{ task.contract_name or '-' }}</dd>
       <dt>血缘规则</dt><dd>{{ task.lineage_name or '-' }}</dd>
-      <dt>配置哈希</dt><dd class="mono">{{ task.config_hash }}</dd>
+      <dt>配置哈希</dt><dd class="mono">{{ task.config_hash or report.meta.config_hash }}</dd>
       <dt>工具版本</dt><dd>v{{ task.tool_version }}</dd>
       <dt>完成时间</dt><dd>{{ (task.finished_at or '-').replace('T', ' ') }}</dd>
     </dl>

@@ -6,6 +6,7 @@
 
 from datetime import datetime
 from pathlib import Path
+import os
 import traceback
 import uuid
 from typing import Any, Dict, List, Optional
@@ -14,7 +15,8 @@ from . import __version__
 from .config import AppConfig
 from .parser.archive_loader import ArchiveError, SecurityError, load_archive
 from .parser.table_reader import TableReadError, read_manifest_table
-from .report.renderer import build_report_context, render_reports
+from .report.renderer import (build_report_context, remove_reports,
+                              render_reports)
 from .store.sqlite_store import SQLiteStore
 from .validator.anomaly_check import validate_anomalies
 from .validator.hash_verify import compute_file_hashes, verify_hashes
@@ -81,10 +83,15 @@ def _safe_relative(path: Path, workspace: Path) -> str:
 
 
 def _write_log(config: AppConfig, task_id: str, lines: List[str]) -> Path:
-    """将任务日志写入本地 logs 目录。"""
+    """将任务日志原子写入本地 logs 目录。
+
+    先写入同目录临时文件再替换目标，避免进程中断时留下半份日志。
+    """
     path = config.logs_dir / (task_id + ".log")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
+    temp_path = config.logs_dir / (task_id + ".log.tmp")
+    temp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(str(temp_path), str(path))
+    return Path(path)
 
 
 def _read_tables(extraction: Any, config: AppConfig, sample: bool) -> tuple:
@@ -145,6 +152,16 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         "report_html": "", "report_json": "", "log_path": "",
         "result_json": "{}",
     }
+    # 复用任务 ID 时（测试注入或重跑）先清掉历史产物，避免报告/历史串任务。
+    if store.get_task(task_id) is not None:
+        remove_reports(config, task_id)
+        try:
+            (config.logs_dir / (task_id + ".log")).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        store.delete_task(task_id)
     store.create_task(task)
     lines = ["[%s] 任务 %s 开始" % (uploaded_at, task_id),
              "数据包: %s (%d 字节)" % (task["packet_name"], packet_size)]
@@ -225,25 +242,36 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         "error_summary": "；".join(item.get("summary", "") for item in results
                                    if not item.get("passed"))[:500],
     })
+    # 报告生成也必须纳入最终结论：任何一步失败都只保留统一的 failed 状态。
+    report: Dict[str, Any] = {}
+    report_paths: Dict[str, str] = {}
+    report_error = ""
     try:
-        report = build_report_context(task, results, config)
-        report_paths = render_reports(report, config, task_id)
-        task["report_md"] = _safe_relative(Path(report_paths["md"]), config.workspace_dir)
-        task["report_html"] = _safe_relative(Path(report_paths["html"]), config.workspace_dir)
-        task["report_json"] = _safe_relative(Path(report_paths["json"]), config.workspace_dir)
-        report["task"] = task
+        candidate = build_report_context(task, results, config)
+        paths = render_reports(candidate, config, task_id)
+        candidate["task"] = dict(task)
+        report = candidate
+        report_paths = paths
     except Exception as exc:
-        unexpected = "报告生成失败: %s" % exc
-        task["status"] = "error"
+        report_error = "报告生成失败: %s" % exc
+        remove_reports(config, task_id)
+        lines.append(report_error)
+        task["status"] = "failed"
         task["passed"] = False
-        report_paths = {}
-        report = {}
-        lines.append(unexpected)
-    log_path = _write_log(config, task_id, lines + ["任务结束: %s" % task["status"]])
-    task["log_path"] = _safe_relative(log_path, config.workspace_dir)
+        task["error_summary"] = (task["error_summary"] + "；" + report_error)[:500]
+    task["report_md"] = (_safe_relative(Path(report_paths["md"]), config.workspace_dir)
+                         if report_paths else "")
+    task["report_html"] = (_safe_relative(Path(report_paths["html"]), config.workspace_dir)
+                           if report_paths else "")
+    task["report_json"] = (_safe_relative(Path(report_paths["json"]), config.workspace_dir)
+                           if report_paths else "")
+    try:
+        log_path = _write_log(config, task_id, lines + ["任务结束: %s" % task["status"]])
+        task["log_path"] = _safe_relative(log_path, config.workspace_dir)
+    except OSError as exc:
+        lines.append("日志写入失败: %s" % exc)
+        task["log_path"] = ""
     task["result_json"] = {"results": results}
-    if not report:
-        task["error_summary"] = (task["error_summary"] + "；" + unexpected)[:500]
     store.update_task(
         task_id, finished_at=task["finished_at"], status=task["status"],
         passed=task["passed"], archive_type=task["archive_type"],

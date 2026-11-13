@@ -99,6 +99,39 @@ def test_duplicate_member(tmp_path, config):
         load_archive(path, config)
 
 
+def test_case_only_collision_rejected(tmp_path, config):
+    """同目录下仅大小写不同的两个文件仍必须拦截。"""
+    path = tmp_path / "case.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.yaml", "files: {}\ntables: {}\n")
+        archive.writestr("data/a.csv", "a")
+        archive.writestr("data/A.csv", "b")
+    with pytest.raises(SecurityError, match="大小写"):
+        load_archive(path, config)
+    tar_path = tmp_path / "case.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as archive:
+        for name, data in (("manifest.yaml", b"files: {}\ntables: {}\n"),
+                           ("data/a.csv", b"a"), ("data/A.csv", b"b")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, BytesIO(data))
+    with pytest.raises(SecurityError, match="大小写"):
+        load_archive(tar_path, config)
+
+
+def test_backslash_and_case_resolution(tmp_path, config):
+    """manifest 的反斜杠与大小写写法应解析到包内实际成员。"""
+    path = _safe_zip(tmp_path, extra={"TABLE/Users.CSV": "id\n1\n"})
+    result = load_archive(path, config)
+    try:
+        assert result.resolve_relative("table\\users.csv") == "TABLE/Users.CSV"
+        assert result.resolve_relative("./TABLE\\USERS.CSV") == "TABLE/Users.CSV"
+        assert result.resolve_relative("data\\missing.csv") is None
+        assert result.safe_path("TABLE\\users.CSV").is_file()
+    finally:
+        result.cleanup()
+
+
 def test_symlink_member(tmp_path, config):
     path = tmp_path / "link.zip"
     with zipfile.ZipFile(path, "w") as archive:

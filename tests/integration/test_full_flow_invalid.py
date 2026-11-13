@@ -73,6 +73,73 @@ def test_all_eight_scenarios_are_detected(config, store):
     assert store.stats()["failed"] == 8
 
 
+def test_sequential_fail_then_pass_does_not_leak(config, store):
+    """连续提交坏包与合法包时不得串任务；合法包结果完全独立。"""
+    failing = INVALID_ROOT / "hash_tampered" / "hash_tampered.zip"
+    passing = ROOT / "fixtures" / "valid_packets" / "retail_valid_a.zip"
+    for _ in range(2):
+        bad = run_validation(failing, failing.name, config, store)
+        good = run_validation(passing, "same_name.zip", config, store)
+        assert bad["task"]["task_id"] != good["task"]["task_id"]
+        assert bad["task"]["status"] == "failed"
+        assert good["task"]["status"] == "passed"
+        assert not good["report"]["issues"]
+        assert all(item["passed"] for item in good["results"])
+        assert good["report"]["task"]["task_id"] == good["task"]["task_id"]
+        stored = store.get_task(good["task"]["task_id"])
+        assert stored["status"] == "passed"
+        assert all(item["passed"] for item in stored["result"]["results"])
+    assert not list(config.temp_dir.iterdir())
+
+
+def test_report_failure_is_consistent_and_leaves_nothing(config, store, monkeypatch):
+    """报告生成失败时历史、详情、下载均不可见半成品，状态统一为失败。"""
+    import gateway.pipeline as pipeline
+    from gateway.app import create_app
+
+    def broken_render(report, app_config, task_id):
+        (app_config.reports_dir / (task_id + ".md")).write_text("half", encoding="utf-8")
+        raise OSError("模拟报告写入失败")
+
+    monkeypatch.setattr(pipeline, "render_reports", broken_render)
+    packet = ROOT / "fixtures" / "valid_packets" / "retail_valid_a.zip"
+    outcome = run_validation(packet, packet.name, config, store, task_id="repfail01")
+    task = outcome["task"]
+    assert task["status"] == "failed"
+    assert task["passed"] is False
+    assert task["report_md"] == task["report_html"] == task["report_json"] == ""
+    assert outcome["report_paths"] == {}
+    stored = store.get_task("repfail01")
+    assert stored["status"] == "failed"
+    assert stored["passed"] is False
+    assert "报告生成失败" in stored["error_summary"]
+    assert not list(config.reports_dir.glob("repfail01.*"))
+    monkeypatch.undo()
+    client = create_app(config).test_client()
+    assert client.get("/tasks/repfail01/report/html").status_code == 404
+    detail = client.get("/tasks/repfail01")
+    assert detail.status_code == 200
+    assert "准入不通过" in detail.get_data(as_text=True)
+
+
+def test_reused_task_id_resets_history_and_artifacts(config, store):
+    """同一任务 ID 重跑时历史只保留本次结果，报告与日志被覆盖。"""
+    failing = INVALID_ROOT / "schema_mismatch" / "schema_mismatch.zip"
+    passing = ROOT / "fixtures" / "valid_packets" / "retail_valid_a.zip"
+    run_validation(failing, failing.name, config, store, task_id="reused01")
+    first_log = (config.logs_dir / "reused01.log").read_text(encoding="utf-8")
+    outcome = run_validation(passing, passing.name, config, store, task_id="reused01")
+    stored = store.get_task("reused01")
+    assert stored["status"] == "passed"
+    assert all(item["passed"] for item in stored["result"]["results"])
+    first_result = stored["result"]["results"][0]
+    assert first_result["key"] == "archive"
+    assert (config.logs_dir / "reused01.log").read_text(encoding="utf-8") != first_log
+    assert not [path for path in config.logs_dir.glob("reused01*") if path.suffix == ".tmp"]
+    assert len([path for path in config.reports_dir.glob("reused01.*")
+                if not path.name.endswith(".tmp")]) == 3
+
+
 def test_invalid_upload_does_not_crash_web(config):
     app = create_app(config)
     client = app.test_client()

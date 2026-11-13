@@ -58,10 +58,33 @@ class ExtractionResult:
     manifest: Dict[str, Any]
     mime_type: str = "application/octet-stream"
     _cleaned: bool = field(default=False, init=False)
+    _path_index: Dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """构建大小写无关的成员路径索引，供 manifest 路径解析使用。"""
+        self._path_index = {str(item["path"]).casefold(): str(item["path"])
+                            for item in self.files}
+
+    def resolve_relative(self, relative: str) -> Optional[str]:
+        """把 manifest 中的路径解析为包内实际成员路径。
+
+        反斜杠、``./`` 前缀与大小写差异都会在比对前规范化。无法匹配时返回
+        ``None``，由调用方按缺失文件处理，绝不做模糊猜测。
+        """
+        try:
+            normalized = _normalize_member(str(relative))
+        except SecurityError:
+            raise
+        return self._path_index.get(normalized.casefold())
 
     def safe_path(self, relative: str) -> Path:
-        """取得临时目录内的文件绝对路径，拒绝任何越界路径。"""
-        return _safe_join(self.temp_dir, relative)
+        """取得临时目录内的文件绝对路径，拒绝任何越界路径。
+
+        若路径能解析到包内实际成员（忽略大小写与分隔符差异），优先返回该
+        成员路径；否则返回规范化后的预期路径。
+        """
+        resolved = self.resolve_relative(relative)
+        return _safe_join(self.temp_dir, resolved if resolved is not None else relative)
 
     def cleanup(self) -> None:
         """删除临时解压目录；重复调用安全。"""
@@ -110,6 +133,21 @@ def _normalize_member(name: str) -> str:
     return "/".join(parts)
 
 
+def normalize_relative_path(name: str) -> str:
+    """对外暴露的包内相对路径规范化：统一分隔符并拒绝越界写法。"""
+    return _normalize_member(str(name))
+
+
+def comparison_key(name: str) -> str:
+    """返回用于包内文件匹配的大小写无关键。
+
+    压缩包成员与 manifest 声明可能来自区分大小写的系统，也可能来自不区分
+    大小写的系统。比对时统一使用规范路径的小写形式，但落盘与展示仍保留
+    实际成员名。
+    """
+    return _normalize_member(str(name)).casefold()
+
+
 def detect_archive_type(path: Path) -> str:
     """按文件内容识别 zip/tar.gz，不依赖扩展名或系统解压命令。"""
     path = Path(path)
@@ -154,6 +192,7 @@ def _inspect_zip(path: Path, config: AppConfig) -> Dict[str, Any]:
     """检查 zip 中央目录，提前拦截加密、链接、越界与压缩比异常。"""
     infos = []
     names = set()
+    folded_names = set()
     total = 0
     with zipfile.ZipFile(path, "r") as archive:
         raw_infos = archive.infolist()
@@ -163,7 +202,11 @@ def _inspect_zip(path: Path, config: AppConfig) -> Dict[str, Any]:
             normalized = _normalize_member(info.filename)
             if normalized in names:
                 raise SecurityError("压缩包包含重复成员: %s" % normalized)
+            folded = normalized.casefold()
+            if folded in folded_names:
+                raise SecurityError("压缩包包含仅大小写不同的重复成员: %s" % normalized)
             names.add(normalized)
+            folded_names.add(folded)
             if info.flag_bits & 0x1:
                 raise SecurityError("不支持加密压缩包")
             mode = (info.external_attr >> 16) & 0o170000
@@ -188,6 +231,7 @@ def _inspect_tar(path: Path, config: AppConfig) -> Dict[str, Any]:
     """检查 tar.gz 成员类型、路径和声明大小。"""
     members = []
     names = set()
+    folded_names = set()
     total = 0
     with tarfile.open(path, "r:gz") as archive:
         raw_members = archive.getmembers()
@@ -197,7 +241,11 @@ def _inspect_tar(path: Path, config: AppConfig) -> Dict[str, Any]:
             normalized = _normalize_member(member.name)
             if normalized in names:
                 raise SecurityError("压缩包包含重复成员: %s" % normalized)
+            folded = normalized.casefold()
+            if folded in folded_names:
+                raise SecurityError("压缩包包含仅大小写不同的重复成员: %s" % normalized)
             names.add(normalized)
+            folded_names.add(folded)
             if member.issym() or member.islnk():
                 raise SecurityError("压缩包包含链接文件: %s" % normalized)
             if not (member.isfile() or member.isdir()):
@@ -310,9 +358,9 @@ def load_archive(path: Path, config: AppConfig) -> ExtractionResult:
 
 
 def lookup_manifest_file(manifest: Dict[str, Any], relative: str) -> Optional[Dict[str, Any]]:
-    """在 manifest.files 中查询声明，支持 ``./`` 前缀归一化。"""
-    normalized = _normalize_member(relative)
+    """在 manifest.files 中查询声明，支持反斜杠、``./`` 前缀与大小写归一化。"""
+    normalized = comparison_key(relative)
     for key, value in manifest.get("files", {}).items():
-        if _normalize_member(str(key)) == normalized:
+        if comparison_key(str(key)) == normalized:
             return value if isinstance(value, dict) else {}
     return None

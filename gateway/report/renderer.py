@@ -7,6 +7,7 @@ HTML 报告使用内联样式，不引用任何 CDN、字体、脚本或图片�
 from datetime import datetime
 from pathlib import Path
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -133,18 +134,22 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
     samples = []
     for result in results:
         samples.extend(result.get("samples", []))
+    # 以任务最终状态为唯一结论来源，避免历史、详情与报告各自推算而分叉。
+    # 旧任务没有写入 config_hash 时再退回当前配置指纹。
+    config_hash = str(task.get("config_hash") or config.fingerprint())
     return {
         "meta": {
             "tool": "数包闸检", "tool_version": __version__,
             "generated_at": generated_at or datetime.now().isoformat(timespec="seconds"),
-            "config_hash": config.fingerprint(),
+            "config_hash": config_hash,
         },
         "task": task,
+        "status": str(task.get("status") or ("passed" if task.get("passed") else "failed")),
         "checks": checks,
         "passed_checks": passed_count,
         "total_checks": total,
         "pass_rate": round(passed_count / total * 100, 2) if total else 0.0,
-        "overall_passed": bool(task.get("passed")) and passed_count == total,
+        "overall_passed": bool(task.get("passed")),
         "issues": issues,
         "samples": samples[:50],
         "suggestions": suggestions,
@@ -170,8 +175,41 @@ def _safe_task_id(task_id: str) -> str:
     return cleaned
 
 
+def _report_paths(config: AppConfig, safe_id: str) -> Dict[str, Path]:
+    """返回三种报告的目标路径。"""
+    return {
+        "md": config.reports_dir / (safe_id + ".md"),
+        "html": config.reports_dir / (safe_id + ".html"),
+        "json": config.reports_dir / (safe_id + ".json"),
+    }
+
+
+def remove_reports(config: AppConfig, task_id: str) -> None:
+    """尽力删除任务的三种报告文件及写入临时文件。
+
+    任务 ID 非法时不做任何操作，避免误删报告目录之外的路径。重复调用安全。
+    """
+    try:
+        safe_id = _safe_task_id(task_id)
+    except ValueError:
+        return
+    candidates = list(_report_paths(config, safe_id).values())
+    candidates.extend(path.with_name(path.name + ".tmp")
+                      for path in _report_paths(config, safe_id).values())
+    for path in candidates:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+
+
 def render_reports(report: Dict[str, Any], config: AppConfig, task_id: str) -> Dict[str, str]:
-    """渲染三种报告并写入本地 reports 目录。
+    """渲染三种报告并原子写入本地 reports 目录。
+
+    三种格式全部渲染成功后才替换目标文件；任一步失败都会清理本次生成的
+    临时文件，避免留下可下载的半成品。
 
     Returns:
         ``{"md": 路径, "html": 路径, "json": 路径}``。
@@ -185,12 +223,20 @@ def render_reports(report: Dict[str, Any], config: AppConfig, task_id: str) -> D
     markdown = env.get_template("report_document.md").render(report=report)
     json_text = json.dumps(report, ensure_ascii=False, indent=2, default=str)
     config.reports_dir.mkdir(parents=True, exist_ok=True)
-    paths = {
-        "md": config.reports_dir / (safe_id + ".md"),
-        "html": config.reports_dir / (safe_id + ".html"),
-        "json": config.reports_dir / (safe_id + ".json"),
-    }
-    paths["md"].write_text(markdown, encoding="utf-8")
-    paths["html"].write_text(html, encoding="utf-8")
-    paths["json"].write_text(json_text, encoding="utf-8")
+    paths = _report_paths(config, safe_id)
+    temp_paths = {key: path.with_name(path.name + ".tmp")
+                  for key, path in paths.items()}
+    contents = {"md": markdown, "html": html, "json": json_text}
+    try:
+        for key, text in contents.items():
+            temp_paths[key].write_text(text, encoding="utf-8")
+        for key in paths:
+            os.replace(str(temp_paths[key]), str(paths[key]))
+    except BaseException:
+        for temp_path in temp_paths.values():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
     return {key: str(path) for key, path in paths.items()}

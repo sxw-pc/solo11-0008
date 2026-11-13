@@ -1,10 +1,12 @@
 """多格式报告渲染单元测试。"""
 
 import json
+from pathlib import Path
 
 import pytest
 
-from gateway.report.renderer import build_report_context, render_reports
+from gateway.report.renderer import (build_report_context, remove_reports,
+                                     render_reports)
 
 
 def _task(passed=False):
@@ -88,6 +90,35 @@ def test_render_rejects_path_traversal_task_id(config):
     report = build_report_context(_task(), _results(), config)
     with pytest.raises(ValueError, match="任务 ID"):
         render_reports(report, config, "../evil")
+
+
+def test_render_failure_leaves_no_partial_reports(config, monkeypatch):
+    """任一格式写入失败时不得留下可下载的半成品。"""
+    report = build_report_context(_task(), _results(), config)
+    original = Path.write_text
+
+    def fail_json(self, *args, **kwargs):
+        if self.name.endswith(".json.tmp"):
+            raise OSError("模拟磁盘写入失败")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_json)
+    with pytest.raises(OSError, match="模拟磁盘"):
+        render_reports(report, config, "task001")
+    assert not list(config.reports_dir.glob("task001.*"))
+    assert not list(config.reports_dir.glob("task001.*.tmp"))
+    remove_reports(config, "task001")
+    remove_reports(config, "../evil")
+
+
+def test_overwrite_existing_reports(config):
+    report = build_report_context(_task(), _results(), config)
+    render_reports(report, config, "task001")
+    first = (config.reports_dir / "task001.md").read_text(encoding="utf-8")
+    render_reports(report, config, "task001")
+    assert (config.reports_dir / "task001.md").read_text(encoding="utf-8") == first
+    remove_reports(config, "task001")
+    assert not (config.reports_dir / "task001.md").exists()
 
 
 def test_empty_results(config):

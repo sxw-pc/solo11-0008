@@ -3,6 +3,7 @@
 - **任务 ID**：{{ report.task.task_id }}
 - **数据包**：{{ report.task.packet_name }}
 - **总体结论**：{{ "通过" if report.overall_passed else "不通过" }}
+- **任务状态**：{{ report.status }}
 - **校验项通过率**：{{ report.pass_rate }}%
 - **工具版本**：{{ report.meta.tool_version }}
 - **配置哈希**：{{ report.meta.config_hash }}

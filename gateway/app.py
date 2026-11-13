@@ -17,7 +17,7 @@ from flask import (Flask, abort, flash, redirect, render_template, request,
 from . import __version__
 from .config import PROJECT_ROOT, AppConfig, load_config
 from .pipeline import run_validation
-from .report.renderer import build_report_context
+from .report.renderer import build_report_context, remove_reports
 from .store.sqlite_store import SQLiteStore
 
 _PRESETS = {
@@ -194,10 +194,16 @@ def create_app(config: Optional[AppConfig] = None,
 
     @app.route("/tasks/<task_id>/delete", methods=["POST"])
     def delete_task(task_id: str) -> Any:
-        """删除任务记录、报告与日志文件。"""
+        """删除任务记录、报告与日志文件。
+
+        报告按任务 ID 统一命名，即使数据库中路径字段为空或异常，也会按 ID
+        清理残留文件；日志按记录的相对路径清理。已有报告链接随记录删除后
+        统一返回 404。
+        """
         task = store.get_task(task_id)
         if task is None:
             abort(404)
+        remove_reports(config, task_id)
         for key, root in (("report_md", config.reports_dir),
                           ("report_html", config.reports_dir),
                           ("report_json", config.reports_dir),
