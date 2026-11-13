@@ -7,7 +7,6 @@
 from datetime import datetime
 from pathlib import Path
 import traceback
-import uuid
 from typing import Any, Dict, List, Optional
 
 from . import __version__
@@ -121,9 +120,12 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         含 task、results、report、report_paths 的字典。
     """
     packet_path = Path(packet_path).resolve()
-    task_id = task_id or uuid.uuid4().hex[:16]
-    if not all(char.isalnum() or char in "-_" for char in task_id):
-        raise ValueError("非法任务 ID")
+    if task_id is not None:
+        if not all(char.isalnum() or char in "-_" for char in task_id):
+            raise ValueError("非法任务 ID")
+    else:
+        # 由存储层生成库内唯一 ID，避免重复/并发提交时任务与报告互相串读。
+        task_id = store.generate_task_id()
     contract_path = Path(contract_path) if contract_path else config.builtin_contract
     lineage_path = Path(lineage_path) if lineage_path else config.builtin_lineage
     started = datetime.now()
@@ -145,7 +147,19 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         "report_html": "", "report_json": "", "log_path": "",
         "result_json": "{}",
     }
-    store.create_task(task)
+    auto_id = task_id is None
+    for _ in range(3):
+        try:
+            store.create_task(task)
+            break
+        except ValueError:
+            # 并发下 ID 碰撞：自动 ID 重新生成后重试；外部注入的固定 ID 直接抛出。
+            if not auto_id:
+                raise
+            task_id = store.generate_task_id()
+            task["task_id"] = task_id
+    else:  # pragma: no cover - 连续碰撞在实际中不可达，仅作防御性兜底
+        raise RuntimeError("创建任务失败：无法分配唯一任务 ID")
     lines = ["[%s] 任务 %s 开始" % (uploaded_at, task_id),
              "数据包: %s (%d 字节)" % (task["packet_name"], packet_size)]
     results: List[Dict[str, Any]] = []

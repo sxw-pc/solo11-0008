@@ -76,3 +76,49 @@ def test_reopen_database(tmp_path):
     first.create_task(_task("persisted"))
     second = SQLiteStore(path)
     assert second.get_task("persisted")["packet_name"] == "mock.zip"
+
+
+def test_generated_task_id_is_unique(store):
+    store.create_task(_task("fixed1"))
+    for _ in range(20):
+        new_id = store.generate_task_id()
+        assert new_id != "fixed1"
+        assert not store.task_exists(new_id)
+        store.create_task(_task(new_id))
+    # 已占用的 ID 必须能被识别
+    assert store.task_exists("fixed1")
+    assert not store.task_exists("not-used-id")
+
+
+def test_duplicate_insert_raises_value_error(store):
+    store.create_task(_task("dup"))
+    with pytest.raises(ValueError, match="任务 ID 已存在"):
+        store.create_task(_task("dup"))
+
+
+def test_legacy_database_remains_accessible(tmp_path):
+    """存量库（缺少后加列也不影响）可直接打开并读取历史任务。"""
+    import sqlite3
+    path = tmp_path / "legacy" / "gateway.db"
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(str(path))
+    connection.execute(
+        "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, packet_name TEXT NOT NULL, "
+        "packet_size INTEGER NOT NULL DEFAULT 0, packet_sha256 TEXT NOT NULL DEFAULT '', "
+        "archive_type TEXT NOT NULL DEFAULT '', uploaded_at TEXT NOT NULL, "
+        "finished_at TEXT, status TEXT NOT NULL DEFAULT 'running', "
+        "passed INTEGER NOT NULL DEFAULT 0, contract_name TEXT NOT NULL DEFAULT '', "
+        "lineage_name TEXT NOT NULL DEFAULT '', duration_seconds REAL NOT NULL DEFAULT 0, "
+        "config_hash TEXT NOT NULL DEFAULT '', tool_version TEXT NOT NULL DEFAULT '', "
+        "error_summary TEXT NOT NULL DEFAULT '', report_md TEXT NOT NULL DEFAULT '', "
+        "report_html TEXT NOT NULL DEFAULT '', report_json TEXT NOT NULL DEFAULT '', "
+        "log_path TEXT NOT NULL DEFAULT '', result_json TEXT NOT NULL DEFAULT '{}')")
+    connection.execute(
+        "INSERT INTO tasks (task_id, packet_name, uploaded_at) VALUES "
+        "('legacy1', 'old.zip', '2024-01-01T10:00:00')")
+    connection.commit()
+    connection.close()
+    store = SQLiteStore(path)
+    item = store.get_task("legacy1")
+    assert item is not None and item["packet_name"] == "old.zip"
+    assert item["result"] == {}

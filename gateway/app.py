@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import shutil
 import tempfile
+import time
 import uuid
 from typing import Any, Optional
 
@@ -62,6 +63,58 @@ def _unlink_quiet(path: Path) -> None:
         pass
 
 
+def _task_local_paths(task: dict, config: AppConfig) -> list:
+    """解析任务关联的报告与日志绝对路径，越界或空路径直接剔除。
+
+    所有路径都必须落在工作目录内的 reports/ 或 logs/ 子目录，确保删除动作
+    永远不会触及工作目录之外的文件。
+    """
+    roots = (("report_md", config.reports_dir),
+             ("report_html", config.reports_dir),
+             ("report_json", config.reports_dir),
+             ("log_path", config.logs_dir))
+    resolved = []
+    for key, root in roots:
+        relative = str(task.get(key) or "")
+        if not relative:
+            continue
+        path = (config.workspace_dir / relative).resolve()
+        if _inside(path, root):
+            resolved.append(path)
+    return resolved
+
+
+def _delete_task_resources(task: dict, config: AppConfig) -> None:
+    """删除任务关联的全部本地资源（三类报告与日志），缺失不视为错误。"""
+    for path in _task_local_paths(task, config):
+        _unlink_quiet(path)
+
+
+def _sweep_stale_temp_dirs(temp_dir: Path, max_age_seconds: int = 24 * 3600) -> int:
+    """清理上次进程异常退出遗留的超龄 gateway-/upload- 临时目录。
+
+    仅删除超过存活阈值的目录，避免误删仍在执行的并发任务目录；返回清理的
+    目录数量。所有异常都被吞掉，清扫失败不能影响服务启动。
+    """
+    removed = 0
+    if not temp_dir.is_dir():
+        return removed
+    cutoff = time.time() - max_age_seconds
+    for child in temp_dir.iterdir():
+        if not child.is_dir() or not (
+                child.name.startswith("gateway-") or child.name.startswith("upload-")):
+            continue
+        try:
+            if child.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(child, ignore_errors=True)
+            if not child.exists():
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _report_file(task: dict, fmt: str, config: AppConfig) -> Path:
     """解析任务报告路径并阻止越界访问。"""
     key = {"md": "report_md", "html": "report_html", "json": "report_json"}.get(fmt)
@@ -102,6 +155,9 @@ def create_app(config: Optional[AppConfig] = None,
         JSON_AS_ASCII=False,
     )
     store = SQLiteStore(config.db_path)
+    # 清理上次进程异常退出（如被强杀）遗留的超龄临时目录；在途任务的新目录
+    # 因未超龄不会被误删，保证并发任务互不影响。
+    _sweep_stale_temp_dirs(config.temp_dir)
     app.extensions["gateway_config"] = config
     app.extensions["gateway_store"] = store
 
@@ -194,20 +250,15 @@ def create_app(config: Optional[AppConfig] = None,
 
     @app.route("/tasks/<task_id>/delete", methods=["POST"])
     def delete_task(task_id: str) -> Any:
-        """删除任务记录、报告与日志文件。"""
+        """删除任务记录及其关联的全部报告、日志本地资源。"""
         task = store.get_task(task_id)
         if task is None:
             abort(404)
-        for key, root in (("report_md", config.reports_dir),
-                          ("report_html", config.reports_dir),
-                          ("report_json", config.reports_dir),
-                          ("log_path", config.logs_dir)):
-            relative = task.get(key) or ""
-            path = (config.workspace_dir / relative).resolve()
-            if relative and _inside(path, root) and path.is_file():
-                _unlink_quiet(path)
+        # 先清理磁盘资源再删除数据库记录：即便记录删除失败，资源也不会残留；
+        # 资源缺失（已被手工清理）时静默跳过，保证删除操作可重复执行。
+        _delete_task_resources(task, config)
         store.delete_task(task_id)
-        flash("任务 %s 已删除" % task_id, "success")
+        flash("任务 %s 及其报告、日志已删除" % task_id, "success")
         return redirect(url_for("task_list"))
 
     @app.route("/healthz")

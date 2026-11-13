@@ -176,3 +176,69 @@ def test_tar_size_limit(config):
     config.max_uncompressed_bytes = 10
     with pytest.raises(SecurityError, match="总大小"):
         load_archive(Path("fixtures/valid_packets/retail_valid_c.tar.gz"), config)
+
+
+def test_unicode_tar_members_accepted_across_formats(tmp_path, config):
+    """中文/emoji 等合法 Unicode 成员名在三种 tar 格式下都应放行。"""
+    entries = [
+        ("manifest.yaml", b"files: {}\ntables: {}\n"),
+        ("数据目录/用户数据.csv", "编号,名称\n1,张三\n".encode("utf-8")),
+        ("报表/导出😀.parquet", b"fake-parquet"),
+    ]
+    for fmt in (tarfile.USTAR_FORMAT, tarfile.GNU_FORMAT, tarfile.PAX_FORMAT):
+        packet = tmp_path / ("unicode_%d.tar.gz" % fmt)
+        with tarfile.open(packet, "w:gz", format=fmt) as archive:
+            for name, data in entries:
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                archive.addfile(info, BytesIO(data))
+        with load_archive(packet, config) as result:
+            assert result.archive_type == "tar.gz"
+            paths = {item["path"] for item in result.files}
+            assert "数据目录/用户数据.csv" in paths
+            assert "报表/导出😀.parquet" in paths
+            assert result.safe_path("数据目录/用户数据.csv").is_file()
+
+
+def test_tar_root_dot_entry_is_skipped(tmp_path, config):
+    """GNU tar 打包目录时写入的根标记 '.' 不应被判为空路径或路径穿越。"""
+    packet = tmp_path / "root_dot.tar.gz"
+    with tarfile.open(packet, "w:gz") as archive:
+        for name, data in ((".", b""),
+                           ("manifest.yaml", b"files: {}\ntables: {}\n"),
+                           ("数据/文件.csv", b"id\n1\n")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, BytesIO(data) if data else None)
+    with load_archive(packet, config) as result:
+        assert {item["path"] for item in result.files} == {
+            "manifest.yaml", "数据/文件.csv"}
+
+
+def test_unicode_does_not_weakening_security_checks(config):
+    """Unicode 放行的同时，越界/绝对路径/链接拦截逻辑保持不变。"""
+    from gateway.parser.archive_loader import _normalize_member, _RootMember
+    blocked = ["数据/../../etc", "../中文/文件", "/绝对/路径.csv", "C:/数据/x",
+               "目录\\..\\evil", "数据\\..\\x", "a/../b"]
+    for name in blocked:
+        with pytest.raises(SecurityError):
+            _normalize_member(name)
+    with pytest.raises(_RootMember):
+        _normalize_member(".")
+    # 合法 Unicode 名称原样保留
+    assert _normalize_member("数据/报告 😀.csv") == "数据/报告 😀.csv"
+
+
+def test_unicode_tar_symlink_still_rejected(tmp_path, config):
+    """含 Unicode 路径的符号链接 tar 成员仍必须被拦截。"""
+    packet = tmp_path / "unicode_link.tar.gz"
+    with tarfile.open(packet, "w:gz") as archive:
+        manifest = tarfile.TarInfo("manifest.yaml")
+        manifest.size = len(b"files: {}\ntables: {}\n")
+        archive.addfile(manifest, BytesIO(b"files: {}\ntables: {}\n"))
+        link = tarfile.TarInfo("数据/链接")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../文件.csv"
+        archive.addfile(link)
+    with pytest.raises(SecurityError, match="链接"):
+        load_archive(packet, config)

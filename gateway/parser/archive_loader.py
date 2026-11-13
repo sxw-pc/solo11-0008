@@ -40,6 +40,10 @@ class SecurityError(ArchiveError):
     """压缩包触发路径穿越、炸弹或危险文件规则。"""
 
 
+class _RootMember(Exception):
+    """成员规范化后指向压缩包根目录（如 "."），属于应忽略的标记条目。"""
+
+
 @dataclass
 class ExtractionResult:
     """一次安全解压的结果。
@@ -77,23 +81,42 @@ class ExtractionResult:
         """退出上下文时清理临时文件。"""
         self.cleanup()
 
+    def __del__(self) -> None:
+        """对象被回收时兜底清理，防止异常路径遗漏临时解压目录。"""
+        try:
+            self.cleanup()
+        except Exception:
+            # 解释器退出阶段部分模块可能已卸载，终结器不应再抛异常。
+            pass
+
 
 def _safe_join(root: Path, relative: str) -> Path:
-    """将相对路径拼接到 root，并确认结果仍位于 root 下。"""
-    candidate = (root / relative).resolve()
+    """将相对路径拼接到 root，并确认结果仍位于 root 下。
+
+    先做一次纯词法的 ``..``/绝对路径预检（不接触文件系统，对任何 Unicode
+    名称行为一致），再通过 ``resolve()`` 做最终的真实路径归属校验。任何越界
+    情况统一抛出 :class:`SecurityError`，避免把底层异常泄漏给上层。
+    """
+    lexical = _safe_member_name(str(relative))
+    if lexical is None:
+        raise SecurityError("检测到路径穿越: %s" % relative)
+    candidate = (root / lexical)
     root_resolved = root.resolve()
     try:
-        candidate.relative_to(root_resolved)
-    except ValueError as exc:
+        resolved = candidate.resolve()
+        resolved.relative_to(root_resolved)
+    except (ValueError, OSError) as exc:
         raise SecurityError("检测到路径穿越: %s" % relative) from exc
-    return candidate
+    return resolved
 
 
 def _normalize_member(name: str) -> str:
     """规范化压缩包成员名并执行路径安全检查。
 
     反斜杠在 Windows 上具备目录分隔语义，因此统一按 ``/`` 处理。拒绝空名、
-    NUL、绝对路径、盘符以及任何 ``..`` 片段。
+    NUL、绝对路径、盘符以及任何 ``..`` 片段。仅指向压缩包根目录的标记条目
+    （如 ``.``、``./``）抛出 :class:`_RootMember`，由调用方跳过而非判为风险；
+    含中文、emoji 等任意合法 Unicode 的成员名都会原样保留并放行。
     """
     if not name or "\x00" in name:
         raise SecurityError("压缩包包含非法成员名")
@@ -106,8 +129,22 @@ def _normalize_member(name: str) -> str:
     if any(part == ".." for part in parts):
         raise SecurityError("压缩包包含路径穿越: %s" % name)
     if not parts:
-        raise SecurityError("压缩包包含空路径")
+        # 成员仅由 "." 组成（GNU tar 打包目录时会写入根标记），不指向任何
+        # 实际文件，忽略即可；这不是路径穿越，不能因此拦截整个压缩包。
+        raise _RootMember(name)
     return "/".join(parts)
+
+
+def _safe_member_name(name: str) -> Optional[str]:
+    """返回可安全使用的规范化成员名；根标记条目返回 None 供调用方跳过。
+
+    与 :func:`_normalize_member` 共享同一套安全规则，确保 ``..``、绝对路径、
+    盘符与非法名称依旧被拦截，仅把根目录标记从“安全异常”降级为“可忽略”。
+    """
+    try:
+        return _normalize_member(name)
+    except _RootMember:
+        return None
 
 
 def detect_archive_type(path: Path) -> str:
@@ -160,7 +197,10 @@ def _inspect_zip(path: Path, config: AppConfig) -> Dict[str, Any]:
         if len(raw_infos) > config.max_archive_entries:
             raise SecurityError("压缩包条目数超过上限")
         for info in raw_infos:
-            normalized = _normalize_member(info.filename)
+            normalized = _safe_member_name(info.filename)
+            if normalized is None:
+                # 根目录标记（如 "."）不参与重复判定与解压，直接跳过。
+                continue
             if normalized in names:
                 raise SecurityError("压缩包包含重复成员: %s" % normalized)
             names.add(normalized)
@@ -194,7 +234,10 @@ def _inspect_tar(path: Path, config: AppConfig) -> Dict[str, Any]:
         if len(raw_members) > config.max_archive_entries:
             raise SecurityError("压缩包条目数超过上限")
         for member in raw_members:
-            normalized = _normalize_member(member.name)
+            normalized = _safe_member_name(member.name)
+            if normalized is None:
+                # 根目录标记（如 GNU tar 写入的 "."）不参与重复判定与解压。
+                continue
             if normalized in names:
                 raise SecurityError("压缩包包含重复成员: %s" % normalized)
             names.add(normalized)

@@ -9,6 +9,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import sqlite3
+import uuid
 from typing import Any, Dict, List, Optional
 
 _COLUMNS = (
@@ -104,11 +105,16 @@ class SQLiteStore:
             if row.get(name) is None and name not in ("finished_at",):
                 row[name] = ""
         placeholders = ",".join("?" for _ in _COLUMNS)
-        with self._connection() as connection:
-            connection.execute(
-                "INSERT INTO tasks (%s) VALUES (%s)" % (",".join(_COLUMNS), placeholders),
-                [row[name] for name in _COLUMNS],
-            )
+        try:
+            with self._connection() as connection:
+                connection.execute(
+                    "INSERT INTO tasks (%s) VALUES (%s)" % (",".join(_COLUMNS), placeholders),
+                    [row[name] for name in _COLUMNS],
+                )
+        except sqlite3.IntegrityError as exc:
+            # 并发提交下的极小概率主键碰撞：抛出可识别的异常供上层重试，
+            # 绝不覆盖已有任务，避免新任务关联到旧任务的报告。
+            raise ValueError("任务 ID 已存在: %s" % row["task_id"]) from exc
         return str(row["task_id"])
 
     def update_task(self, task_id: str, **fields: Any) -> bool:
@@ -145,6 +151,25 @@ class SQLiteStore:
             row = connection.execute(
                 "SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         return self._row_to_dict(row) if row else None
+
+    def task_exists(self, task_id: str) -> bool:
+        """判断任务 ID 是否已被占用，供并发提交时生成唯一 ID 使用。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1", (task_id,)).fetchone()
+        return row is not None
+
+    def generate_task_id(self, attempts: int = 5) -> str:
+        """生成一个在当前库内唯一的任务 ID。
+
+        并发或重复提交时通过查重重试避免 UUID 极小概率碰撞导致的报告串读；
+        重试耗尽后抛出 RuntimeError，由上层转为结构化失败而不是静默覆盖。
+        """
+        for _ in range(max(1, attempts)):
+            candidate = uuid.uuid4().hex[:16]
+            if not self.task_exists(candidate):
+                return candidate
+        raise RuntimeError("无法生成唯一任务 ID，请稍后重试")
 
     def list_tasks(self, query: str = "", status: str = "",
                    date_from: str = "", date_to: str = "", limit: int = 100) -> List[Dict[str, Any]]:
