@@ -106,6 +106,38 @@ def test_alias_mapping_and_conflicts():
     assert not validate_schema({"t": multi}, multi_contract)["passed"]
 
 
+def test_aliased_field_used_for_required_nullable_enum():
+    """只含别名字段时，required/nullable/enum 必须按映射后的规范字段判断。"""
+    fields = {
+        "user_id": {"type": "string", "required": True, "nullable": False,
+                    "enum": ["U0001", "U0002"]},
+    }
+    contract = _contract(fields, {"aliases": {"user_id": ["uid"]}})
+    ok = _table("t", [{"uid": "U0001"}])
+    assert validate_schema({"t": ok}, contract)["passed"]
+    bad_enum = _table("t", [{"uid": "X"}])
+    result = validate_schema({"t": bad_enum}, contract)
+    assert not result["passed"]
+    assert result["tables"][0]["missing_fields"] == []
+    assert result["tables"][0]["extra_fields"] == []
+    assert {item["code"] for item in result["errors"]} == {"enum"}
+    assert all(item["field"] == "user_id" for item in result["errors"])
+    null_value = _table("t", [{"uid": None}])
+    null_result = validate_schema({"t": null_value}, contract)
+    assert {"type", "enum"} <= {item["code"] for item in null_result["errors"]}
+    assert all(item["field"] == "user_id" for item in null_result["errors"])
+    assert null_result["tables"][0]["missing_fields"] == []
+
+
+def test_reverse_alias_shorthand_maps_to_canonical_field():
+    fields = {"user_id": {"type": "string", "required": True, "enum": ["U0001"]}}
+    reverse = _contract(fields, {"aliases": {"uid": "user_id"}})
+    result = validate_schema({"t": _table("t", [{"uid": "U0001"}])}, reverse)
+    assert result["passed"]
+    assert result["tables"][0]["missing_fields"] == []
+    assert result["tables"][0]["extra_fields"] == []
+
+
 def test_required_nullable_and_date_format():
     fields = {
         "id": {"type": "string", "required": True, "nullable": True},

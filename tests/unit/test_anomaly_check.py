@@ -198,3 +198,40 @@ def test_non_empty_custom_rule(make_table):
     result = validate_anomalies(
         {"t": table}, _rules("t", "value", [{"rule": "custom", "function": "non_empty"}]))
     assert result["fields"][0]["rules"][0]["violations"] == 1
+
+
+def test_alias_field_participates_in_anomaly_rules(make_table):
+    """异常规则字段名应经别名映射后匹配规范字段，且不报 field_missing。"""
+    table = make_table("t", [
+        {"uid": "U0001", "status": "paid"},
+        {"uid": "U0002", "status": "bad"},
+    ])
+    contract = {
+        "tables": {"t": {"aliases": {"user_id": ["uid"],
+                                      "status": ["state"]},
+                          "fields": {}}},
+        "anomaly_rules": {"t": {
+            "user_id": [{"rule": "duplicate_rate", "max": 0.0}],
+            "status": [{"rule": "regex", "pattern": "^(paid|pending)$"}],
+        }},
+    }
+    result = validate_anomalies({"t": table}, contract)
+    assert not result["passed"]
+    assert result["errors"] == []
+    status = next(item for item in result["fields"] if item["field"] == "status")
+    assert not status["passed"]
+    assert status["rules"][0]["violations"] == 1
+    user = next(item for item in result["fields"] if item["field"] == "user_id")
+    assert user["passed"]
+    assert user["checked"] == 2
+
+
+def test_alias_contract_missing_nonexistent_canonical_still_reported(make_table):
+    table = make_table("t", [{"value": "x"}])
+    contract = {
+        "tables": {"t": {"aliases": {"uid": ["user_id"]}, "fields": {}}},
+        "anomaly_rules": {"t": {"user_id": [{"rule": "null_rate", "max": 0.0}]}},
+    }
+    result = validate_anomalies({"t": table}, contract)
+    codes = {item["code"] for item in result["errors"]}
+    assert "field_missing" in codes

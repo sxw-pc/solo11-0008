@@ -13,6 +13,7 @@ import pandas as pd
 
 from ..parser.table_reader import TableData
 from .custom_rules import get_custom_rule
+from .schema_check import ContractError, _apply_aliases
 
 _BUILTIN_RULES = {"range", "regex", "date", "null_rate", "duplicate_rate", "custom"}
 
@@ -255,15 +256,23 @@ def validate_anomalies(tables: Dict[str, TableData],
         if not isinstance(table_rules, dict):
             errors.append({"code": "rule_invalid", "message": "表 %s 规则必须为映射" % table_name})
             continue
+        try:
+            table_meta = config.get("tables", {}).get(str(table_name), {})
+            frame, _ = _apply_aliases(
+                table_data.frame, table_meta if isinstance(table_meta, dict) else {},
+                str(table_name))
+        except ContractError as exc:
+            errors.append({"code": "contract_error", "message": str(exc)})
+            continue
         for field, rules in table_rules.items():
-            if field not in table_data.frame.columns:
+            if field not in frame.columns:
                 errors.append({"code": "field_missing", "message": "异常规则字段不存在: %s.%s"
                                % (table_name, field)})
                 continue
             if not isinstance(rules, list):
                 rules = [rules]
             fields.append(_check_field(str(table_name), str(field),
-                                       table_data.frame[field], rules,
+                                       frame[field], rules,
                                        table_data.row_offset, samples))
     failed_fields = [item for item in fields if not item["passed"]]
     passed = not failed_fields and not errors

@@ -110,32 +110,58 @@ def _field_schema(field: str, rule: Dict[str, Any]) -> Dict[str, Any]:
 
 def _apply_aliases(frame: pd.DataFrame, table: Dict[str, Any],
                    table_name: str) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
-    """按 aliases 配置将上游字段名映射为契约标准字段名。"""
+    """按 aliases 配置把上游字段名映射为契约标准字段名。
+
+    标准写法是 ``标准字段: [上游候选列]``；同时兼容 ``上游列: 标准字段``
+    的简写，避免自定义契约因方向写反而把合法别名列当成缺失/多余字段。
+
+    Returns:
+        ``(映射后的数据帧, 别名冲突错误列表)``；调用方应只使用映射后的
+        列名参与 required、nullable、enum 与异常规则判断。
+    """
     aliases = table.get("aliases") or {}
     if not isinstance(aliases, dict):
         raise ContractError("表 %s 的 aliases 必须为映射" % table_name)
+    fields = table.get("fields") or {}
     renamed = frame.copy()
     errors: List[Dict[str, Any]] = []
     for canonical, candidates in aliases.items():
         if candidates is None:
             continue
-        candidate_list = [candidates] if isinstance(candidates, str) else list(candidates)
-        matches = [str(item) for item in candidate_list if str(item) in renamed.columns]
-        if canonical in renamed.columns:
-            if matches:
+        canonical_name = str(canonical)
+        candidate_list = ([candidates] if isinstance(candidates, str)
+                          else list(candidates))
+        candidate_names = [str(item) for item in candidate_list
+                           if str(item) in renamed.columns]
+        # 反向简写：键是上游列名，值是契约标准字段名。
+        if canonical_name not in fields:
+            targets = [str(item) for item in candidate_list if str(item) in fields]
+            if len(targets) == 1 and canonical_name in renamed.columns:
+                target = targets[0]
+                if target in renamed.columns:
+                    errors.append({
+                        "table": table_name, "field": target, "row": None,
+                        "code": "alias_conflict",
+                        "message": "标准字段与别名字段同时存在",
+                    })
+                else:
+                    renamed = renamed.rename(columns={canonical_name: target})
+                continue
+        if canonical_name in renamed.columns:
+            if candidate_names:
                 errors.append({
-                    "table": table_name, "field": canonical, "row": None,
+                    "table": table_name, "field": canonical_name, "row": None,
                     "code": "alias_conflict",
                     "message": "标准字段与别名字段同时存在",
                 })
             continue
-        if len(matches) > 1:
+        if len(candidate_names) > 1:
             errors.append({
-                "table": table_name, "field": canonical, "row": None,
+                "table": table_name, "field": canonical_name, "row": None,
                 "code": "alias_conflict", "message": "多个别名字段同时命中",
             })
-        elif len(matches) == 1:
-            renamed = renamed.rename(columns={matches[0]: canonical})
+        elif len(candidate_names) == 1:
+            renamed = renamed.rename(columns={candidate_names[0]: canonical_name})
     return renamed, errors
 
 

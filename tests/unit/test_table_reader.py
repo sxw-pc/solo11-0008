@@ -6,6 +6,7 @@ import sqlite3
 import pandas as pd
 import pytest
 
+from gateway.config import AppConfig
 from gateway.parser.archive_loader import load_archive
 from gateway.parser.table_reader import (TableReadError, iter_table_specs,
                                          read_manifest_table, read_table)
@@ -90,6 +91,42 @@ def test_sampling_is_deterministic(tmp_path, config):
     assert first.total_rows == 100
     assert first.frame.index.tolist() == second.frame.index.tolist()
     assert first.sample_ratio == 0.1
+
+
+def test_packet_sampling_uses_single_ratio_and_seed(make_table):
+    """整包抽样：比例与种子只生效一次，同长度表不再抽到相同行位置。"""
+    from gateway.parser.table_reader import sample_tables
+
+    def table(name, count):
+        rows = [{"value": index} for index in range(count)]
+        return make_table(name, rows, offset=1)
+
+    tables = {"a": table("a", 100), "b": table("b", 100)}
+    first = sample_tables(tables, AppConfig(sample_ratio=0.1, random_seed=42))
+    second = sample_tables(tables, AppConfig(sample_ratio=0.1, random_seed=42))
+    for name in ("a", "b"):
+        assert first[name].sampled_rows == 10
+        assert first[name].total_rows == 100
+        assert first[name].sample_ratio == 0.1
+        assert first[name].frame.index.tolist() == second[name].frame.index.tolist()
+    # 随机流跨表推进，两张等长表不会得到完全相同的抽样行。
+    assert first["a"].frame.index.tolist() != first["b"].frame.index.tolist()
+    # 全量表对象不被修改，供血缘阶段继续使用。
+    assert len(tables["a"].frame) == 100
+
+
+def test_packet_sampling_keeps_small_tables_and_changes_seed(make_table):
+    from gateway.parser.table_reader import sample_tables
+
+    small = make_table("small", [{"value": index} for index in range(3)], offset=1)
+    large = make_table("large", [{"value": index} for index in range(97)], offset=1)
+    sampled = sample_tables({"small": small, "large": large},
+                            AppConfig(sample_ratio=0.1, random_seed=42))
+    assert sampled["small"].sampled_rows == 1
+    assert sampled["large"].sampled_rows == 10
+    other = sample_tables({"small": small, "large": large},
+                          AppConfig(sample_ratio=0.1, random_seed=7))
+    assert other["large"].frame.index.tolist() != sampled["large"].frame.index.tolist()
 
 
 def test_missing_unsupported_and_empty_parquet(tmp_path, config):

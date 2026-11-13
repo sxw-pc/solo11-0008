@@ -3,9 +3,10 @@
 from fnmatch import fnmatch
 from hashlib import md5, sha256
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import AppConfig
+from ..parser.archive_loader import normalize_relative_path as _normalize_path
 
 MANIFEST_NAME = "manifest.yaml"
 
@@ -44,6 +45,23 @@ def _allowed_extra(relative: str, config: AppConfig) -> bool:
     """判断未声明文件是否命中配置的额外白名单。"""
     normalized = str(relative).replace("\\", "/")
     return any(fnmatch(normalized, pattern) for pattern in config.allowed_extra_paths)
+
+
+def _index_actual_files(extract_root: Path) -> Tuple[Dict[str, Path], List[str]]:
+    """建立归一化路径到真实文件的索引，并返回原始相对路径列表。
+
+    Returns:
+        ``(归一化索引, 原始相对路径列表)``；索引中的值保留磁盘真实大小写。
+    """
+    index: Dict[str, Path] = {}
+    originals: List[str] = []
+    for path in sorted(extract_root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(extract_root).as_posix()
+        originals.append(relative)
+        index.setdefault(_normalize_path(relative), path)
+    return index, originals
 
 
 def _parse_expected_hash(expected: str) -> Dict[str, str]:
@@ -109,28 +127,27 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
     """
     extract_root = Path(extract_root)
     declared = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
-    declared_norm = {str(key).replace("\\", "/").lstrip("./"): value
-                     for key, value in declared.items()}
-    actual_files = []
-    for path in sorted(extract_root.rglob("*")):
-        if path.is_file():
-            relative = path.relative_to(extract_root).as_posix()
-            actual_files.append((relative, path))
-    actual_names = {relative for relative, _ in actual_files}
+    declared_norm = {}
+    for key, value in declared.items():
+        normalized = _normalize_path(str(key))
+        # 同一文件被多种写法重复声明时保留首个声明，避免重复计数。
+        declared_norm.setdefault(normalized, (str(key), value))
+    actual_index, actual_originals = _index_actual_files(extract_root)
     errors: List[Dict[str, Any]] = []
     checked = 0
-    for relative, value in declared_norm.items():
-        if relative == MANIFEST_NAME:
+    for normalized, (display, value) in declared_norm.items():
+        if normalized == _normalize_path(MANIFEST_NAME):
             continue
-        if relative not in actual_names:
+        actual_path = actual_index.get(normalized)
+        if actual_path is None:
             errors.append({
-                "code": "missing_file", "path": relative,
+                "code": "missing_file", "path": display,
                 "message": "manifest 声明的文件缺失",
             })
             continue
         if not isinstance(value, dict):
             errors.append({
-                "code": "invalid_hash_declaration", "path": relative,
+                "code": "invalid_hash_declaration", "path": display,
                 "message": "manifest 哈希声明格式错误",
             })
             continue
@@ -138,33 +155,34 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
         expected_sha = value.get("sha256")
         if not expected_md5 and not expected_sha:
             errors.append({
-                "code": "missing_hash_declaration", "path": relative,
+                "code": "missing_hash_declaration", "path": display,
                 "message": "manifest 未声明 MD5 或 SHA256",
             })
             continue
-        computed = compute_file_hashes(extract_root / relative)
+        computed = compute_file_hashes(actual_path)
         checked += 1
         if expected_md5 and computed["md5"].lower() != str(expected_md5).lower():
             errors.append({
-                "code": "hash_mismatch", "path": relative, "algorithm": "md5",
+                "code": "hash_mismatch", "path": display, "algorithm": "md5",
                 "expected": str(expected_md5), "actual": computed["md5"],
                 "message": "文件 MD5 哈希不一致，疑似被篡改",
             })
         if expected_sha and computed["sha256"].lower() != str(expected_sha).lower():
             errors.append({
-                "code": "hash_mismatch", "path": relative, "algorithm": "sha256",
+                "code": "hash_mismatch", "path": display, "algorithm": "sha256",
                 "expected": str(expected_sha), "actual": computed["sha256"],
                 "message": "文件 SHA256 哈希不一致，疑似被篡改",
             })
-    for relative, _ in actual_files:
-        if relative == MANIFEST_NAME:
+    for relative in actual_originals:
+        if _normalize_path(relative) == _normalize_path(MANIFEST_NAME):
             continue
         if is_dangerous_file(relative, config):
             errors.append({
                 "code": "dangerous_file", "path": relative,
                 "message": "检测到高危可执行或脚本文件",
             })
-        if relative not in declared_norm and not _allowed_extra(relative, config):
+        if (_normalize_path(relative) not in declared_norm
+                and not _allowed_extra(relative, config)):
             errors.append({
                 "code": "redundant_file", "path": relative,
                 "message": "检测到 manifest 未声明的冗余文件",
@@ -186,7 +204,7 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
     return {
         "key": "hash", "name": "文件完整性与哈希校验", "passed": not errors,
         "checked_files": checked, "declared_files": len(declared_norm),
-        "actual_files": len(actual_names), "errors": errors[:100],
+        "actual_files": len(actual_originals), "errors": errors[:100],
         "error_codes": codes, "package_hash": package_result,
         "summary": ("全部文件哈希与完整性校验通过" if not errors
                     else "发现 %d 项完整性问题: %s" % (len(errors), "、".join(codes))),

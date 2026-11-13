@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 from . import __version__
 from .config import AppConfig
 from .parser.archive_loader import ArchiveError, SecurityError, load_archive
-from .parser.table_reader import TableReadError, read_manifest_table
+from .parser.table_reader import (TableReadError, read_manifest_table,
+                                  sample_tables)
 from .report.renderer import build_report_context, render_reports
 from .store.sqlite_store import SQLiteStore
 from .validator.anomaly_check import validate_anomalies
@@ -87,14 +88,18 @@ def _write_log(config: AppConfig, task_id: str, lines: List[str]) -> Path:
     return path
 
 
-def _read_tables(extraction: Any, config: AppConfig, sample: bool) -> tuple:
-    """读取 manifest 声明的全部表，返回表映射和失败明细。"""
+def _read_tables(extraction: Any, config: AppConfig) -> tuple:
+    """读取 manifest 声明的全部表，返回全量表映射和失败明细。
+
+    仅读取一次全量数据；异常抽检所需的抽样表由 :func:`sample_tables`
+    在整包范围内统一派生，避免比例和种子逐表重复生效。
+    """
     tables = {}
     errors = []
     for table_name in (extraction.manifest.get("tables") or {}).keys():
         try:
             tables[str(table_name)] = read_manifest_table(
-                extraction, str(table_name), config, sample=sample)
+                extraction, str(table_name), config, sample=False)
         except TableReadError as exc:
             errors.append({"code": "table_read_error", "table": str(table_name),
                            "message": str(exc)})
@@ -167,7 +172,7 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
                 expected_package_hash=expected_package_hash, package_path=packet_path)
             results.append(hash_result)
             lines.append("哈希校验: %s" % hash_result["summary"])
-            tables, read_errors = _read_tables(extraction, config, sample=False)
+            tables, read_errors = _read_tables(extraction, config)
             if read_errors or not tables:
                 read_result = _error_result(
                     "table_read", "结构化表读取适配",
@@ -181,8 +186,7 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
                     "summary": "成功读取 %d 张表（血缘使用全量，规则校验使用抽样）"
                                % len(tables), "errors": [], "samples": [],
                 })
-            sampled_tables, sample_errors = _read_tables(extraction, config, sample=True)
-            read_errors.extend(sample_errors)
+            sampled_tables = sample_tables(tables, config)
             try:
                 contract = load_contract(contract_path)
                 schema_result = validate_schema(sampled_tables or tables, contract)

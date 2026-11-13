@@ -60,8 +60,23 @@ class ExtractionResult:
     _cleaned: bool = field(default=False, init=False)
 
     def safe_path(self, relative: str) -> Path:
-        """取得临时目录内的文件绝对路径，拒绝任何越界路径。"""
-        return _safe_join(self.temp_dir, relative)
+        """取得临时目录内的文件绝对路径，拒绝任何越界路径。
+
+        当清单中的路径与解压文件仅存在 ``./``、``//``、反斜杠或大小写
+        差异时，按归一化形式回退定位真实文件，保证合法包不会因等价写法
+        被误报缺失；越界检查仍在回退前完成。
+        """
+        candidate = _safe_join(self.temp_dir, relative)
+        if candidate.exists():
+            return candidate
+        normalized = normalize_relative_path(relative)
+        if not normalized:
+            return candidate
+        for path in self.temp_dir.rglob("*"):
+            if path.is_file() and normalize_relative_path(
+                    path.relative_to(self.temp_dir).as_posix()) == normalized:
+                return path
+        return candidate
 
     def cleanup(self) -> None:
         """删除临时解压目录；重复调用安全。"""
@@ -76,6 +91,23 @@ class ExtractionResult:
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         """退出上下文时清理临时文件。"""
         self.cleanup()
+
+
+def normalize_relative_path(value: str) -> str:
+    """把清单键或相对路径折叠为可比较形式，用于等价路径匹配。
+
+    仅处理语义等价差异：``./`` 前缀、重复 ``/``、反斜杠、首尾空白与
+    大小写。不执行越界判定，调用方仍需先完成安全检查。
+
+    Args:
+        value: 原始相对路径或 manifest 键。
+    Returns:
+        POSIX 分隔、无空段的小写相对路径。
+    """
+    parts = [part for part in PurePosixPath(
+        str(value).strip().replace("\\", "/")).parts
+        if part not in ("", ".", "/")]
+    return "/".join(parts).lower()
 
 
 def _safe_join(root: Path, relative: str) -> Path:

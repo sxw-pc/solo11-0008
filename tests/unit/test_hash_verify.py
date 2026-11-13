@@ -149,3 +149,43 @@ def test_bare_md5_and_declared_manifest_key(tmp_path, config):
     result = verify_hashes(root, {"files": {"manifest.yaml": {"sha256": "0" * 64}},
                                   "tables": {}}, config)
     assert result["passed"]
+
+
+def test_equivalent_declared_paths_do_not_double_report(tmp_path, config):
+    """等价写法（./、//、大小写）不应同时触发缺失与冗余。"""
+    root = tmp_path / "root"
+    (root / "data").mkdir(parents=True)
+    data = root / "data" / "users.csv"
+    data.write_text("id\n1\n", encoding="utf-8")
+    hashes = {"md5": md5(data.read_bytes()).hexdigest(),
+              "sha256": sha256(data.read_bytes()).hexdigest()}
+    for declared in ("./data/users.csv", "data//users.csv", "DATA/USERS.CSV"):
+        result = verify_hashes(root, {"files": {declared: hashes}, "tables": {}}, config)
+        assert result["passed"], (declared, result["errors"])
+        assert result["checked_files"] == 1
+
+
+def test_redundant_file_still_blocked_with_normalized_declarations(tmp_path, config):
+    root = tmp_path / "root"
+    (root / "data").mkdir(parents=True)
+    data = root / "data" / "users.csv"
+    data.write_text("id\n1\n", encoding="utf-8")
+    (root / "data" / "extra.csv").write_text("id\n2\n", encoding="utf-8")
+    hashes = {"sha256": sha256(data.read_bytes()).hexdigest()}
+    result = verify_hashes(root, {"files": {"data//users.csv": hashes}, "tables": {}}, config)
+    assert not result["passed"]
+    assert result["error_codes"] == ["redundant_file"]
+    assert result["errors"][0]["path"] == "data/extra.csv"
+
+
+def test_md5_only_manifest_still_accepted(tmp_path, config):
+    root = tmp_path / "root"
+    root.mkdir()
+    data = root / "a.csv"
+    data.write_text("id\n1\n", encoding="utf-8")
+    result = verify_hashes(root, {
+        "files": {"a.csv": {"md5": md5(data.read_bytes()).hexdigest()}},
+        "tables": {},
+    }, config)
+    assert result["passed"]
+    assert result["checked_files"] == 1

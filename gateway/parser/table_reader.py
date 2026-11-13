@@ -8,7 +8,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -146,17 +146,114 @@ def _read_sqlite(path: Path, table_name: Optional[str]) -> TableData:
     )
 
 
-def _apply_sample(frame: pd.DataFrame, ratio: float, seed: int) -> pd.DataFrame:
-    """按比例执行可复现的均匀随机抽样，至少保留一行。"""
-    if ratio >= 1.0 or frame.empty:
-        return frame
-    count = max(1, int(round(len(frame) * ratio)))
-    if count >= len(frame):
-        return frame
+def _sample_indices(total: int, ratio: float, seed: int) -> List[int]:
+    """对整包一次抽样生成行索引，返回已排序的位置列表。
+
+    抽样以 ``total``（整包全部行数）为总体、``seed`` 为唯一随机源，因此
+    同一包在同一配置下任意表、任意格式得到完全相同的抽样行位置；比例和
+    种子不会每张表重新起算。行数按比例四舍五入并至少保留一行。
+
+    Args:
+        total: 整包待抽样总行数。
+        ratio: 抽样比例，位于 (0, 1]。
+        seed: 随机种子。
+    Returns:
+        升序排列的行位置（DataFrame 中的 0 基位置）。
+    """
+    if total <= 0 or ratio >= 1.0:
+        return list(range(total))
+    count = max(1, int(round(total * ratio)))
+    if count >= total:
+        return list(range(total))
     try:
-        return frame.sample(n=count, random_state=seed).sort_index()
-    except (ValueError, KeyError) as exc:
+        positions = pd.Series(range(total)).sample(
+            n=count, random_state=seed).tolist()
+    except (ValueError, KeyError) as exc:  # pragma: no cover - pandas 内部异常
         raise TableReadError("抽样失败: %s" % exc) from exc
+    return sorted(int(position) for position in positions)
+
+
+def _apply_sample(frame: pd.DataFrame, ratio: float, seed: int) -> pd.DataFrame:
+    """按比例执行可复现的整包均匀随机抽样，至少保留一行。
+
+    兼容单表调用：以当前表行数作为总体。整包抽样请使用
+    :func:`_apply_packet_sample`，确保比例和种子在包内只生效一次。
+    """
+    positions = _sample_indices(len(frame), ratio, seed)
+    if len(positions) >= len(frame):
+        return frame
+    return frame.iloc[positions].sort_index()
+
+
+def _apply_packet_sample(frames: Dict[str, pd.DataFrame], ratio: float, seed: int
+                         ) -> Dict[str, pd.DataFrame]:
+    """对整包各表执行统一抽样，返回与输入同键的新数据帧映射。
+
+    随机数生成器只在整包范围内创建一次，并按 manifest 中的表顺序连续
+    抽取，因此抽样比例与种子不会对每张表重新生效。相同行数的表也会因
+    随机流向前推进而得到不同行位置，结果仍可由种子完整复现。每张非空表
+    至少保留一行，避免小表因四舍五入被完全抽样掉。
+
+    Args:
+        frames: 表名到全量数据帧的映射。
+        ratio: 整包统一抽样比例。
+        seed: 随机种子。
+    Returns:
+        ``{表名: 抽样后数据帧}``，空表原样保留。
+    """
+    result: Dict[str, pd.DataFrame] = {}
+    if ratio >= 1.0:
+        return {name: frame for name, frame in frames.items()}
+    try:
+        import numpy as np
+        random_source: Any = np.random.RandomState(seed)
+    except (ImportError, ValueError):  # pragma: no cover - numpy 为 pandas 依赖
+        random_source = seed
+    for name, frame in frames.items():
+        total = len(frame)
+        if total == 0:
+            result[name] = frame
+            continue
+        count = max(1, int(round(total * ratio)))
+        if count >= total:
+            result[name] = frame
+            continue
+        try:
+            result[name] = frame.sample(
+                n=count, random_state=random_source).sort_index()
+        except (ValueError, KeyError) as exc:
+            raise TableReadError("抽样失败: %s" % exc) from exc
+    return result
+
+
+def sample_tables(tables: Dict[str, TableData], config: AppConfig) -> Dict[str, TableData]:
+    """对整包各表执行统一抽样，返回新的 TableData 映射。
+
+    抽样比例 ``config.sample_ratio`` 与种子 ``config.random_seed`` 在整个
+    数据包范围内只生效一次，避免逐文件重新起算导致统计口径漂移。输入的
+    全量表对象不被修改，便于血缘阶段继续使用全量数据。
+
+    Args:
+        tables: 表名到全量 TableData 的映射。
+        config: 提供整包抽样比例与随机种子。
+    Returns:
+        表名到抽样后 TableData 的映射；原对象保持不变。
+    """
+    sampled_frames = _apply_packet_sample(
+        {name: data.frame for name, data in tables.items()},
+        config.sample_ratio, config.random_seed)
+    result: Dict[str, TableData] = {}
+    for name, data in tables.items():
+        frame = sampled_frames[name]
+        result[name] = TableData(
+            name=data.name, frame=frame, source_format=data.source_format,
+            total_rows=data.total_rows, sampled_rows=len(frame),
+            sample_ratio=(config.sample_ratio if len(frame) < data.total_rows
+                          else 1.0),
+            encoding=data.encoding, sqlite_table=data.sqlite_table,
+            row_offset=data.row_offset,
+        )
+    return result
 
 
 def read_table(path: Path, source_format: str, config: AppConfig,
