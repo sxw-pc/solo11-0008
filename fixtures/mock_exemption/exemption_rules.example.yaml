@@ -1,0 +1,71 @@
+# 分级豁免规则配置样例（本地离线加载，禁止任何网络来源）
+#
+# 启用方式：在 AppConfig / 配置 YAML 中设置
+#   exemption_rules_path: 本文件的绝对路径
+# 不配置或文件不存在时，豁免模块整体短路，校验流程与旧版本完全一致。
+#
+# 匹配三维度：business_domain（业务域）+ anomaly_types（异常类型）+ scope（影响范围）
+# 冲突仲裁：deny 优先于 exempt；同类动作按 具体度 > 到期更早 > 规则 ID 取最严格者，
+#           并在审计与报告中输出冲突提示。
+# 安全底线：路径穿越、压缩炸弹、高危可执行文件、整包哈希不符等高危异常永不豁免；
+#           未命中、过期、停用或规则非法时一律保持拦截。
+
+version: "1.0"
+description: 跨安全域数据交换历史遗留问题分级豁免样例
+rules:
+  # L1 临时豁免：短期、最小范围，到期自动恢复拦截
+  - id: EXM-TRD-NULLRATE-L1
+    business_domain: trade            # 数据包 manifest.packet.business_domain
+    anomaly_types: [null_rate]        # 异常类型代码，"*" 表示任意类型
+    scope:
+      tables: [trades]                # 影响范围：表，"*" 或省略表示不限
+      fields: [note]                  # 影响范围：字段
+    action: exempt                    # exempt=豁免放行；deny=显式拒绝（维持拦截）
+    grade: L1
+    effective_from: "2025-01-01"      # 有效期起（含）
+    effective_to: "2025-06-30"        # 有效期止（含），到期自动拦截
+    approvers: ["数据治理部", "安全合规部"]   # 多部门确认，至少一个
+    reason: "交易备注字段历史空值率偏高，限期整改期间临时豁免"
+    enabled: true
+
+  # L2 限期豁免：跨表血缘孤立记录，限定具体关联表
+  - id: EXM-TRD-LINEAGE-L2
+    business_domain: trade
+    anomaly_types: [orphan_record]
+    scope:
+      tables: [orders]
+      fields: [user_id]
+    action: exempt
+    grade: L2
+    effective_from: "2025-01-01"
+    effective_to: "2026-12-31"
+    approvers: ["业务归口部门", "数据治理部"]
+    reason: "存量订单存在少量历史孤立外键，已纳入数据治理台账限期清理"
+
+  # 显式拒绝规则：资金字段类型错误一律不得豁免，优先级高于任何 exempt
+  - id: EXM-TRD-TYPE-DENY
+    business_domain: trade
+    anomaly_types: [type]
+    scope:
+      tables: [trades, orders]
+      fields: [amount, quantity]
+    action: deny
+    grade: L1
+    effective_from: "2025-01-01"
+    effective_to: "2099-12-31"
+    approvers: ["安全合规部"]
+    reason: "资金/数量字段类型错误可能引发计费风险，禁止豁免"
+
+  # 通配业务域示例：适用于未声明 business_domain 的历史数据包（仅 "*" 可命中无域包）
+  - id: EXM-COMMON-REDUNDANCY
+    business_domain: "*"
+    anomaly_types: [redundant_file]
+    scope:
+      paths: ["data/README.txt"]
+    action: exempt
+    grade: L3
+    effective_from: "2025-01-01"
+    effective_to: "2026-12-31"
+    approvers: ["运维管理部"]
+    reason: "随包说明文档属于已知冗余文件，长期备案豁免"
+    enabled: false                   # 停用规则不参与匹配，保留备查

@@ -52,6 +52,12 @@ def _check_error_count(result: Dict[str, Any]) -> int:
     return len(result.get("errors", []))
 
 
+def _exemption_info(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """提取错误/规则对象上的豁免标记，无标记返回空字典（历史任务兼容）。"""
+    info = obj.get("exemption")
+    return info if isinstance(info, dict) else {}
+
+
 def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """把各校验项的错误归一化为报告问题列表。"""
     issues: List[Dict[str, Any]] = []
@@ -59,7 +65,8 @@ def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         check = result.get("name") or result.get("key")
         if result.get("key") == "schema":
             for item in result.get("errors", []):
-                issues.append({**item, "check": check})
+                issues.append({**item, "check": check,
+                               "exemption": _exemption_info(item)})
         elif result.get("key") == "lineage":
             for relation in result.get("relations", []):
                 for error in relation.get("errors", []):
@@ -69,6 +76,7 @@ def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                         "relation": relation.get("name"),
                         "table": relation.get("left_table"),
                         "field": relation.get("left_field"),
+                        "exemption": _exemption_info(error),
                     })
         elif result.get("key") == "anomaly":
             for field in result.get("fields", []):
@@ -81,10 +89,12 @@ def _collect_issues(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                                 "异常率 %.2f%% / 阈值 %.2f%%" % (
                                     float(rule.get("rate", 0)) * 100,
                                     float(rule.get("threshold", 0)) * 100)),
+                            "exemption": _exemption_info(rule),
                         })
         else:
             for error in result.get("errors", []):
-                issues.append({**error, "check": check})
+                issues.append({**error, "check": check,
+                               "exemption": _exemption_info(error)})
     # 去重并限制报告问题数量，避免报告体积失控。
     unique = []
     seen = set()
@@ -133,6 +143,10 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
     samples = []
     for result in results:
         samples.extend(result.get("samples", []))
+    # 豁免汇总来自任务元数据；历史任务与未启用豁免时为空结构，模板自动隐藏章节。
+    exemption = task.get("exemption") if isinstance(task, dict) else None
+    if not isinstance(exemption, dict):
+        exemption = {}
     return {
         "meta": {
             "tool": "数包闸检", "tool_version": __version__,
@@ -149,6 +163,7 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
         "samples": samples[:50],
         "suggestions": suggestions,
         "lineage_graph": lineage.get("graph", {}),
+        "exemption": exemption,
     }
 
 

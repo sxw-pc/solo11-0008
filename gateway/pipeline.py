@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .config import AppConfig
+from .exemption import ExemptionEngine, ExemptionRuleError, resolve_business_domain
+from .exemption.rules import load_exemption_rules
 from .parser.archive_loader import ArchiveError, SecurityError, load_archive
 from .parser.table_reader import TableReadError, read_manifest_table
 from .report.renderer import build_report_context, render_reports
@@ -148,6 +150,16 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
     store.create_task(task)
     lines = ["[%s] 任务 %s 开始" % (uploaded_at, task_id),
              "数据包: %s (%d 字节)" % (task["packet_name"], packet_size)]
+    # 任务启动阶段即固化豁免规则快照：任务运行期间规则文件变更不影响本任务。
+    # 规则内容非法时不阻断校验，而是禁用一切豁免，回退到默认严格拦截。
+    engine = None
+    exemption_summary = None
+    ruleset_snapshot = None
+    try:
+        ruleset_snapshot = load_exemption_rules(config.exemption_rules_path)
+    except ExemptionRuleError as exc:
+        ruleset_snapshot = None
+        lines.append("豁免规则加载失败，已禁用豁免并保持严格拦截: %s" % exc)
     results: List[Dict[str, Any]] = []
     extraction = None
     unexpected = ""
@@ -157,6 +169,15 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
             task["archive_type"] = extraction.archive_type
             results.append(_archive_result(extraction))
             lines.append("压缩包安全检查通过: %s" % extraction.archive_type)
+            if ruleset_snapshot is not None and ruleset_snapshot:
+                business_domain = resolve_business_domain(extraction.manifest)
+                engine = ExemptionEngine(
+                    ruleset_snapshot, task_id, business_domain,
+                    config.exemption_audit_dir)
+                engine.__enter__()
+                lines.append("豁免规则快照已加载: 指纹 %s，业务域 %s"
+                             % (ruleset_snapshot.ruleset_hash[:12],
+                                business_domain or "(未声明)"))
         except (SecurityError, ArchiveError) as exc:
             results.append(_archive_error_result(exc))
             results.extend(_skipped_results("压缩包安全检查未通过"))
@@ -215,6 +236,29 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         if extraction is not None:
             extraction.cleanup()
             lines.append("临时解压目录已清理")
+    # 校验流程完成后再做豁免复核：未命中/过期/拒绝的异常一律保持拦截。
+    # 引擎在 apply 内关闭审计链并释放规则快照，确保任务结束不残留内存引用。
+    if engine is not None:
+        try:
+            exemption_summary = engine.apply(results)
+            # 立即挂到任务，保证随后渲染的报告与持久化历史使用同一份豁免留痕。
+            task["exemption"] = exemption_summary
+            if exemption_summary.get("exempted"):
+                lines.append("豁免复核: 放行 %d 项，拦截 %d 项，拒绝 %d 项，过期拦截 %d 项"
+                             % (exemption_summary["exempted"],
+                                exemption_summary["blocked"],
+                                exemption_summary["denied"],
+                                exemption_summary["expired_blocked"]))
+            if exemption_summary.get("conflict_count"):
+                lines.append("豁免规则冲突 %d 处，均已按最严格优先级执行"
+                             % exemption_summary["conflict_count"])
+        except Exception as exc:  # 豁免模块自身异常时绝不放行，回退严格拦截。
+            exemption_summary = None
+            task.pop("exemption", None)
+            lines.append("豁免复核异常，已回退严格拦截: %s: %s"
+                         % (type(exc).__name__, exc))
+        finally:
+            engine.close()
     passed = bool(results) and all(item.get("passed") for item in results) and not unexpected
     finished = datetime.now()
     duration = round((finished - started).total_seconds(), 3)
@@ -241,7 +285,15 @@ def run_validation(packet_path: Path, packet_name: str, config: AppConfig,
         lines.append(unexpected)
     log_path = _write_log(config, task_id, lines + ["任务结束: %s" % task["status"]])
     task["log_path"] = _safe_relative(log_path, config.workspace_dir)
-    task["result_json"] = {"results": results}
+    if exemption_summary is not None:
+        # 审计文件路径转工作目录相对路径，随任务历史与报告一起可归档、可迁移。
+        if exemption_summary.get("audit_path"):
+            exemption_summary["audit_path"] = _safe_relative(
+                Path(exemption_summary["audit_path"]), config.workspace_dir)
+        task["exemption"] = exemption_summary
+        task["result_json"] = {"results": results, "exemption": exemption_summary}
+    else:
+        task["result_json"] = {"results": results}
     if not report:
         task["error_summary"] = (task["error_summary"] + "；" + unexpected)[:500]
     store.update_task(

@@ -42,6 +42,8 @@ class AppConfig:
     max_content_length: int = 1536 * 1024 ** 2
     builtin_contract: Path = DEFAULT_CONTRACT
     builtin_lineage: Path = DEFAULT_LINEAGE
+    # 本地分级豁免规则文件；None 或文件不存在表示不启用豁免，旧流程零变化。
+    exemption_rules_path: Optional[Path] = None
     blocked_extensions: tuple = (
         ".exe", ".dll", ".bat", ".cmd", ".com", ".scr", ".msi", ".ps1",
         ".sh", ".bash", ".py", ".pyw", ".jar", ".vbs", ".js", ".jsp",
@@ -54,6 +56,7 @@ class AppConfig:
     uploads_dir: Path = field(init=False)
     temp_dir: Path = field(init=False)
     logs_dir: Path = field(init=False)
+    exemption_audit_dir: Path = field(init=False)
     db_path: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -61,6 +64,8 @@ class AppConfig:
         self.workspace_dir = Path(self.workspace_dir).resolve()
         self.builtin_contract = Path(self.builtin_contract).resolve()
         self.builtin_lineage = Path(self.builtin_lineage).resolve()
+        if self.exemption_rules_path is not None:
+            self.exemption_rules_path = Path(self.exemption_rules_path).resolve()
         if self.host not in LOOPBACK_HOSTS:
             raise ValueError("服务仅允许监听本机回环地址")
         if not 1 <= int(self.port) <= 65535:
@@ -76,8 +81,9 @@ class AppConfig:
         self.uploads_dir = self.workspace_dir / "uploads"
         self.temp_dir = self.workspace_dir / "tmp"
         self.logs_dir = self.workspace_dir / "logs"
+        self.exemption_audit_dir = self.workspace_dir / "exemption_audit"
         for folder in (self.workspace_dir, self.reports_dir, self.uploads_dir,
-                       self.temp_dir, self.logs_dir):
+                       self.temp_dir, self.logs_dir, self.exemption_audit_dir):
             folder.mkdir(parents=True, exist_ok=True)
         self.db_path = self.workspace_dir / "gateway.db"
         self.blocked_extensions = tuple(

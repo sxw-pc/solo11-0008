@@ -81,13 +81,14 @@
   <h2>异常明细</h2>
   {% if report.issues %}
   <table>
-    <thead><tr><th>校验项</th><th>位置</th><th>代码</th><th>说明</th></tr></thead>
+    <thead><tr><th>校验项</th><th>位置</th><th>代码</th><th>处置</th><th>说明</th></tr></thead>
     <tbody>
     {% for issue in report.issues %}
       <tr>
         <td>{{ issue.check }}</td>
         <td>{{ issue.path or (issue.table or '-') }}{% if issue.field %} / {{ issue.field }}{% endif %}{% if issue.row %} / 行 {{ issue.row }}{% endif %}</td>
         <td>{{ issue.code or '-' }}</td>
+        <td>{% if issue.exemption and issue.exemption.status == 'exempted' %}<span class="badge ok">已豁免 {{ issue.exemption.rule_id }}</span>{% elif issue.exemption and issue.exemption.status == 'blocked_by_rule' %}<span class="badge bad">规则拒绝</span>{% else %}<span class="badge bad">拦截</span>{% endif %}</td>
         <td>{{ issue.message }}</td>
       </tr>
     {% endfor %}
@@ -95,6 +96,40 @@
   </table>
   {% else %}
   <div class="empty">未发现异常明细。</div>
+  {% endif %}
+
+  {% if report.exemption and report.exemption.enabled is defined %}
+  <h2>分级豁免复核</h2>
+  <div class="meta">
+    <div><span class="muted">规则快照指纹</span><br>{{ report.exemption.ruleset_hash[:12] or '-' }}</div>
+    <div><span class="muted">豁免放行</span><br><strong>{{ report.exemption.exempted }}</strong> 项</div>
+    <div><span class="muted">规则拒绝</span><br>{{ report.exemption.denied }} 项</div>
+    <div><span class="muted">未匹配拦截</span><br>{{ report.exemption.blocked }} 项</div>
+    <div><span class="muted">过期拦截</span><br>{{ report.exemption.expired_blocked }} 项</div>
+    <div><span class="muted">规则冲突</span><br>{{ report.exemption.conflict_count }} 处</div>
+    <div><span class="muted">审计留痕</span><br>{{ report.exemption.audit_path or '-' }}</div>
+  </div>
+  {% if report.exemption.exemption_records %}
+  <table>
+    <thead><tr><th>规则 ID</th><th>分级</th><th>校验项</th><th>异常类型</th><th>位置</th><th>有效期</th></tr></thead>
+    <tbody>
+    {% for record in report.exemption.exemption_records %}
+      <tr>
+        <td>{{ record.rule_id }}</td><td>{{ record.grade }}</td><td>{{ record.check }}</td>
+        <td>{{ record.anomaly_type }}</td>
+        <td>{{ record.table or '-' }}{% if record.field %} / {{ record.field }}{% endif %}{% if record.path %} / {{ record.path }}{% endif %}</td>
+        <td>{{ record.valid_from }} 至 {{ record.valid_to }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if report.exemption.conflicts %}
+  <h3>冲突提示（已按最严格优先级执行）</h3>
+  <ul>
+    {% for conflict in report.exemption.conflicts %}<li>{{ conflict.message }}；候选规则：{{ conflict.candidate_rule_ids|join('、') }}</li>{% endfor %}
+  </ul>
+  {% endif %}
   {% endif %}
 
   <h2>错误样例（已截断）</h2>

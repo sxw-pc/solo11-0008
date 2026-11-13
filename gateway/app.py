@@ -174,7 +174,10 @@ def create_app(config: Optional[AppConfig] = None,
         task = store.get_task(task_id)
         if task is None:
             abort(404)
-        results = task.get("result", {}).get("results", [])
+        stored_result = task.get("result", {})
+        results = stored_result.get("results", [])
+        # 历史任务没有 exemption 字段时得到空字典，模板自动隐藏豁免章节。
+        task["exemption"] = stored_result.get("exemption", {})
         report = build_report_context(task, results, config)
         return render_template("report_detail.html", task=task, report=report,
                                log_preview=_log_preview(task, config), config=config)
