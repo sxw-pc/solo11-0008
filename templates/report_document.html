@@ -44,12 +44,19 @@
 
   <section class="grid">
     <div class="stat"><span class="muted">总体结论</span>
-      {% if report.overall_passed %}<strong class="pass">通过</strong>{% else %}<strong class="fail">不通过</strong>{% endif %}
+      {% if report.termination %}<strong class="fail">已终止（部分报告）</strong>{% elif report.overall_passed %}<strong class="pass">通过</strong>{% else %}<strong class="fail">不通过</strong>{% endif %}
     </div>
     <div class="stat"><span class="muted">校验项通过率</span><strong>{{ report.pass_rate }}%</strong></div>
     <div class="stat"><span class="muted">问题数量</span><strong>{{ report.issues|length }}</strong></div>
     <div class="stat"><span class="muted">工具版本</span><strong>{{ report.meta.tool_version }}</strong></div>
   </section>
+  {% if report.termination %}
+  <section style="margin-top:14px;padding:12px 14px;border:1px solid #e3b341;border-radius:6px;background:#fff8e6;color:#8a5a00;">
+    <strong>终止说明</strong>：本任务在「{{ report.termination.stage_label }}」阶段被人工终止
+    （终止请求时间：{{ report.termination.requested_at or '未记录' }}）。
+    本报告仅包含终止前已完成的部分校验结果，不可作为准入依据。
+  </section>
+  {% endif %}
 
   <h2>任务信息</h2>
   <div class="meta">

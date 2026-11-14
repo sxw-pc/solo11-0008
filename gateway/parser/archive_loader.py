@@ -12,12 +12,14 @@ import shutil
 import sys
 import tarfile
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import zipfile
 
 import yaml
 
+from ..cleanup import extract_temp_prefix
 from ..config import AppConfig
+from ..termination import TaskTerminated
 
 if sys.platform.startswith("win"):  # Windows 缺少 libmagic，导入可能阻塞。
     _magic = None
@@ -211,16 +213,32 @@ def _inspect_tar(path: Path, config: AppConfig) -> Dict[str, Any]:
     return {"members": members, "total": total}
 
 
-def _extract_zip(path: Path, temp_dir: Path, inspected: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """流式解压 zip 成员并在每次写入时校验实际大小。"""
+def _stop_requested(should_stop: Optional[Callable[[], bool]]) -> bool:
+    """查询协作式终止标志；未注入时永不终止。"""
+    return bool(should_stop is not None and should_stop())
+
+
+def _extract_zip(path: Path, temp_dir: Path, inspected: Dict[str, Any],
+                 should_stop: Optional[Callable[[], bool]] = None
+                 ) -> List[Dict[str, Any]]:
+    """流式解压 zip 成员并在每次写入时校验实际大小。
+
+    每个成员与每个 1MiB 块写入前检查终止标志，保证超大单文件场景下
+    终止等待不超过一个块的耗时；终止时抛出 TaskTerminated，外层负责
+    清理半成品目录。
+    """
     files = []
     with zipfile.ZipFile(path, "r") as archive:
         for info, normalized in inspected["members"]:
+            if _stop_requested(should_stop):
+                raise TaskTerminated("archive")
             target = _safe_join(temp_dir, normalized)
             target.parent.mkdir(parents=True, exist_ok=True)
             written = 0
             with archive.open(info, "r") as src, target.open("wb") as dst:
                 while True:
+                    if _stop_requested(should_stop):
+                        raise TaskTerminated("archive")
                     chunk = src.read(1024 * 1024)
                     if not chunk:
                         break
@@ -232,11 +250,15 @@ def _extract_zip(path: Path, temp_dir: Path, inspected: Dict[str, Any]) -> List[
     return files
 
 
-def _extract_tar(path: Path, temp_dir: Path, inspected: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """流式解压 tar.gz 并阻止实际字节数超出声明大小。"""
+def _extract_tar(path: Path, temp_dir: Path, inspected: Dict[str, Any],
+                 should_stop: Optional[Callable[[], bool]] = None
+                 ) -> List[Dict[str, Any]]:
+    """流式解压 tar.gz 并阻止实际字节数超出声明大小；支持协作式终止。"""
     files = []
     with tarfile.open(path, "r:gz") as archive:
         for member, normalized in inspected["members"]:
+            if _stop_requested(should_stop):
+                raise TaskTerminated("archive")
             src = archive.extractfile(member)
             if src is None:
                 raise ArchiveError("无法读取成员: %s" % normalized)
@@ -245,6 +267,8 @@ def _extract_tar(path: Path, temp_dir: Path, inspected: Dict[str, Any]) -> List[
             written = 0
             with src, target.open("wb") as dst:
                 while True:
+                    if _stop_requested(should_stop):
+                        raise TaskTerminated("archive")
                     chunk = src.read(1024 * 1024)
                     if not chunk:
                         break
@@ -276,26 +300,35 @@ def _parse_manifest(temp_dir: Path) -> Dict[str, Any]:
     return data
 
 
-def load_archive(path: Path, config: AppConfig) -> ExtractionResult:
+def load_archive(path: Path, config: AppConfig,
+                 should_stop: Optional[Callable[[], bool]] = None,
+                 task_id: Optional[str] = None) -> ExtractionResult:
     """安全加载压缩包并返回解压结果。
 
     Args:
         path: 本地 zip/tar.gz 文件路径。
         config: 全局配置，提供大小、条目数与压缩比阈值。
+        should_stop: 可选协作式终止回调，返回 True 时在成员/块边界抛出
+            TaskTerminated；半成品临时目录由本函数负责清理。
+        task_id: 可选任务 ID，用于生成任务级临时目录前缀，便于终止后
+            按任务精确回收残留资源。
     Returns:
         ExtractionResult: 临时目录、文件列表和 manifest 数据。
     Raises:
         ArchiveError: 格式不支持、清单缺失或内容损坏。
         SecurityError: 命中路径穿越、Zip 炸弹、链接文件等规则。
+        TaskTerminated: 解压过程中收到终止请求。
     """
     path = Path(path).resolve()
     archive_type = detect_archive_type(path)
-    temp_dir = Path(tempfile.mkdtemp(prefix="gateway-", dir=str(config.temp_dir)))
+    prefix = extract_temp_prefix(task_id) if task_id else "gateway-"
+    temp_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=str(config.temp_dir)))
     try:
         inspected = (_inspect_zip(path, config) if archive_type == "zip"
                      else _inspect_tar(path, config))
-        files = (_extract_zip(path, temp_dir, inspected) if archive_type == "zip"
-                 else _extract_tar(path, temp_dir, inspected))
+        files = (_extract_zip(path, temp_dir, inspected, should_stop)
+                 if archive_type == "zip"
+                 else _extract_tar(path, temp_dir, inspected, should_stop))
         manifest = _parse_manifest(temp_dir)
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)

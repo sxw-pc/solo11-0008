@@ -3,9 +3,10 @@
 from fnmatch import fnmatch
 from hashlib import md5, sha256
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..config import AppConfig
+from ..termination import TaskTerminated
 
 MANIFEST_NAME = "manifest.yaml"
 
@@ -92,7 +93,8 @@ def verify_package_hash(package_path: Path, expected: str) -> Dict[str, Any]:
 
 def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfig,
                   expected_package_hash: Optional[str] = None,
-                  package_path: Optional[Path] = None) -> Dict[str, Any]:
+                  package_path: Optional[Path] = None,
+                  should_stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """对解压文件执行哈希、缺失、冗余与恶意文件校验。
 
     manifest.files 中键为相对路径，值至少包含 md5 或 sha256。未被声明且不在
@@ -104,6 +106,8 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
         config: 黑名单与白名单配置。
         expected_package_hash: 可选的压缩包预期哈希。
         package_path: 压缩包原始路径，用于包哈希校验。
+        should_stop: 可选协作式终止回调，逐文件检查，返回 True 时抛出
+            TaskTerminated。
     Returns:
         统一格式的校验结果字典，含 errors 与 checked_files。
     """
@@ -120,6 +124,8 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
     errors: List[Dict[str, Any]] = []
     checked = 0
     for relative, value in declared_norm.items():
+        if should_stop is not None and should_stop():
+            raise TaskTerminated("hash")
         if relative == MANIFEST_NAME:
             continue
         if relative not in actual_names:

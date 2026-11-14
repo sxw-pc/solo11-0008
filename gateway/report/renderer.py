@@ -13,6 +13,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .. import __version__
 from ..config import PROJECT_ROOT, AppConfig
+from ..termination import stage_label
 
 TEMPLATE_DIR = PROJECT_ROOT / "templates"
 _SUGGESTIONS = {
@@ -36,6 +37,7 @@ _SUGGESTIONS = {
     "field_missing": "补齐关联字段或修正 manifest/规则中的字段映射。",
     "null_rate": "提升字段填充率，或在规则中调整合理的空值阈值。",
     "duplicate_rate": "按业务主键去重，并排查上游重复下发。",
+    "terminated": "任务已被人工终止，确认终止原因后可重新上传执行完整校验。",
 }
 _DEFAULT_SUGGESTION = "根据错误明细修正数据包后重新上传校验。"
 
@@ -133,6 +135,16 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
     samples = []
     for result in results:
         samples.extend(result.get("samples", []))
+    terminated_stage = str(task.get("terminated_stage") or "")
+    termination = None
+    if task.get("status") == "terminated" or terminated_stage:
+        termination = {
+            "stage": terminated_stage,
+            "stage_label": stage_label(terminated_stage),
+            "requested_at": str(task.get("terminate_requested_at") or ""),
+            "note": "任务被人工终止，本报告仅包含终止前已完成的校验结果，"
+                    "不可作为准入依据。",
+        }
     return {
         "meta": {
             "tool": "数包闸检", "tool_version": __version__,
@@ -149,6 +161,7 @@ def build_report_context(task: Dict[str, Any], results: List[Dict[str, Any]],
         "samples": samples[:50],
         "suggestions": suggestions,
         "lineage_graph": lineage.get("graph", {}),
+        "termination": termination,
     }
 
 

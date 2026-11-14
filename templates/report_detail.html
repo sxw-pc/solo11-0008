@@ -9,6 +9,12 @@
   </div>
   <div class="page-actions">
     <a class="btn" href="{{ url_for('task_list') }}">返回列表</a>
+    {% if task.status in ('running', 'terminating') %}
+    <form method="post" action="{{ url_for('terminate_task', task_id=task.task_id) }}"
+          class="inline-form js-confirm" data-confirm="确认终止该运行中任务？将在当前校验阶段结束后停止。">
+      <button class="btn danger-outline" type="submit">终止任务</button>
+    </form>
+    {% endif %}
     <form method="post" action="{{ url_for('delete_task', task_id=task.task_id) }}"
           class="inline-form js-confirm" data-confirm="确认删除该任务及全部报告？">
       <button class="btn danger-outline" type="submit">删除任务</button>
@@ -19,8 +25,8 @@
 <section class="result-banner {{ 'ok' if report.overall_passed else 'bad' }}">
   <div>
     <span class="result-kicker">总体结论</span>
-    <strong>{{ '准入通过' if report.overall_passed else '准入不通过' }}</strong>
-    <p>{{ task.error_summary or '全部校验项均通过，未发现阻断性问题。' }}</p>
+    <strong>{% if task.status == 'terminated' %}任务已终止（部分报告）{% elif report.overall_passed %}准入通过{% else %}准入不通过{% endif %}</strong>
+    <p>{% if report.termination %}任务在「{{ report.termination.stage_label }}」阶段被人工终止，以下仅为终止前已完成的部分校验结果，不可作为准入依据。{% else %}{{ task.error_summary or '全部校验项均通过，未发现阻断性问题。' }}{% endif %}</p>
   </div>
   <div class="result-stats">
     <div><strong>{{ report.pass_rate }}%</strong><span>校验项通过率</span></div>
@@ -31,8 +37,8 @@
 
 <div class="detail-grid">
   <section class="card">
-    <div class="card-head"><h2>任务档案</h2><span class="pill {{ 'pass' if task.passed else 'fail' }}">
-      {{ '通过' if task.passed else '不通过' }}</span></div>
+    <div class="card-head"><h2>任务档案</h2><span class="pill {{ 'terminated' if task.status == 'terminated' else ('pass' if task.passed else 'fail') }}">
+      {{ '已终止' if task.status == 'terminated' else ('通过' if task.passed else '不通过') }}</span></div>
     <dl class="kv">
       <dt>任务 ID</dt><dd class="mono">{{ task.task_id }}</dd>
       <dt>数据包大小</dt><dd>{{ task.packet_size }} 字节</dd>
@@ -42,6 +48,10 @@
       <dt>血缘规则</dt><dd>{{ task.lineage_name or '-' }}</dd>
       <dt>配置哈希</dt><dd class="mono">{{ task.config_hash }}</dd>
       <dt>工具版本</dt><dd>v{{ task.tool_version }}</dd>
+      {% if report.termination %}
+      <dt>终止阶段</dt><dd>{{ report.termination.stage_label }}</dd>
+      <dt>终止请求时间</dt><dd>{{ (report.termination.requested_at or '-').replace('T', ' ') }}</dd>
+      {% endif %}
       <dt>完成时间</dt><dd>{{ (task.finished_at or '-').replace('T', ' ') }}</dd>
     </dl>
     <div class="download-row">

@@ -8,12 +8,13 @@
 from datetime import date, datetime
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 import yaml
 
 from ..parser.table_reader import TableData
+from ..termination import TaskTerminated
 
 RELATIONSHIPS = {"one_to_one", "one_to_many", "many_to_one"}
 _REL_LABELS = {"one_to_one": "1→1", "one_to_many": "1→多", "many_to_one": "多→1"}
@@ -231,19 +232,24 @@ def _build_graph(relations: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def validate_lineage(tables: Dict[str, TableData],
-                     rules: Dict[str, Any]) -> Dict[str, Any]:
+                     rules: Dict[str, Any],
+                     should_stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """执行所有血缘关联规则。
 
     Args:
         tables: 表名到全量 TableData 的映射。血缘必须使用全量数据，避免抽样
             造成被引用键缺失的假阳性。
         rules: load_lineage_rules 返回的规则对象。
+        should_stop: 可选协作式终止回调，逐条关联检查，返回 True 时抛出
+            TaskTerminated。
     Returns:
         含 passed、relations、graph、samples 的统一结果字典。
     """
     relations = []
     config_errors = []
     for index, relation in enumerate(rules.get("relations", [])):
+        if should_stop is not None and should_stop():
+            raise TaskTerminated("lineage")
         if not isinstance(relation, dict):
             config_errors.append({"code": "rule_invalid", "message": "第 %d 条规则不是映射" % (index + 1)})
             continue

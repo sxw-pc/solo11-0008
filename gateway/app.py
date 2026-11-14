@@ -2,6 +2,8 @@
 
 服务默认仅监听 127.0.0.1:5000。上传文件在工作目录的 uploads/tmp 下处理，
 校验结束后删除上传副本与临时配置；仅报告、日志和 SQLite 记录长期保留。
+运行中的任务可由运维或复核人员通过终止接口协作式停止，终止后生成标注
+终止阶段的部分报告并完整回收临时资源。
 """
 
 from pathlib import Path
@@ -15,10 +17,12 @@ from flask import (Flask, abort, flash, redirect, render_template, request,
                    send_file, url_for)
 
 from . import __version__
+from .cleanup import upload_temp_prefix
 from .config import PROJECT_ROOT, AppConfig, load_config
 from .pipeline import run_validation
 from .report.renderer import build_report_context
 from .store.sqlite_store import SQLiteStore
+from .termination import terminate_task as request_task_termination
 
 _PRESETS = {
     "trade": (PROJECT_ROOT / "fixtures" / "mock_contract" / "user_trade_contract.yaml",
@@ -130,7 +134,10 @@ def create_app(config: Optional[AppConfig] = None,
         contract_file = request.files.get("contract")
         lineage_file = request.files.get("lineage")
         expected_hash = (request.form.get("expected_hash") or "").strip() or None
-        temp_root = Path(tempfile.mkdtemp(prefix="upload-", dir=str(config.temp_dir)))
+        # 任务 ID 在上传时即确定，上传临时目录按任务命名，便于终止后精确回收。
+        task_id = uuid.uuid4().hex[:16]
+        temp_root = Path(tempfile.mkdtemp(
+            prefix=upload_temp_prefix(task_id), dir=str(config.temp_dir)))
         try:
             upload = _save_upload(packet, temp_root)
             builtin_contract, builtin_lineage = _PRESETS.get(preset, _PRESETS["trade"])
@@ -142,10 +149,12 @@ def create_app(config: Optional[AppConfig] = None,
             outcome = run_validation(
                 upload, _display_name(packet.filename), config, store,
                 contract_path=contract_path, lineage_path=lineage_path,
-                expected_package_hash=expected_hash)
+                expected_package_hash=expected_hash, task_id=task_id)
             status = outcome["task"].get("status")
             if status == "passed":
                 flash("校验通过，报告已生成", "success")
+            elif status == "terminated":
+                flash("任务已被终止，已生成标注终止阶段的部分报告", "error")
             else:
                 flash("校验未通过，请查看报告中的异常明细", "error")
             return redirect(url_for("task_detail", task_id=outcome["task"]["task_id"]))
@@ -191,6 +200,31 @@ def create_app(config: Optional[AppConfig] = None,
                     "json": "application/json; charset=utf-8"}[fmt]
         return send_file(path, mimetype=mimetype, as_attachment=True,
                          download_name="gateway_report_%s.%s" % (task_id, fmt))
+
+    @app.route("/tasks/<task_id>/terminate", methods=["POST"])
+    def terminate_task(task_id: str) -> Any:
+        """请求终止运行中的任务；已完成或已终止的任务拒绝变更。
+
+        终止为协作式：存活任务在当前校验阶段的安全检查点收尾，等待时长
+        不超过单个校验阶段的最大耗时；进程异常退出留下的残留运行中任务
+        会被直接回收并生成部分报告。
+        """
+        outcome = request_task_termination(task_id, store, config)
+        reason = outcome.get("reason")
+        if reason == "cooperative":
+            flash("终止请求已受理，任务将在当前校验阶段结束后停止", "success")
+        elif reason == "already_requested":
+            flash("终止请求已存在，任务正在收尾", "success")
+        elif reason == "already_terminated":
+            flash("任务已处于终止状态，无需重复操作", "success")
+        elif reason == "reclaimed":
+            flash("任务为异常中断残留，已回收并生成部分报告", "success")
+        elif reason == "already_finished":
+            flash("任务已结束（%s），无需终止" % outcome.get("status", ""), "error")
+        else:
+            flash("任务不存在，无法终止", "error")
+            return redirect(url_for("task_list"))
+        return redirect(url_for("task_detail", task_id=task_id))
 
     @app.route("/tasks/<task_id>/delete", methods=["POST"])
     def delete_task(task_id: str) -> Any:

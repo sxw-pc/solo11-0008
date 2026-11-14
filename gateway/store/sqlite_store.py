@@ -16,9 +16,17 @@ _COLUMNS = (
     "uploaded_at", "finished_at", "status", "passed", "contract_name",
     "lineage_name", "duration_seconds", "config_hash", "tool_version",
     "error_summary", "report_md", "report_html", "report_json", "log_path",
-    "result_json",
+    "result_json", "terminated_stage", "terminate_requested_at",
 )
 _UPDATABLE = set(_COLUMNS) - {"task_id"}
+
+#: 1.1.0 新增列，旧库通过 ALTER TABLE 迁移，历史行取默认值，不受影响。
+_MIGRATIONS = (
+    ("terminated_stage", "ALTER TABLE tasks ADD COLUMN terminated_stage "
+                         "TEXT NOT NULL DEFAULT ''"),
+    ("terminate_requested_at", "ALTER TABLE tasks ADD COLUMN "
+                               "terminate_requested_at TEXT NOT NULL DEFAULT ''"),
+)
 
 
 class SQLiteStore:
@@ -47,7 +55,11 @@ class SQLiteStore:
             connection.close()
 
     def init_db(self) -> None:
-        """创建任务表与常用筛选索引，可重复执行。"""
+        """创建任务表与常用筛选索引，可重复执行。
+
+        对已存在的旧版数据库按列补齐迁移（ALTER TABLE ADD COLUMN），
+        不会改写任何历史任务的状态、报告关联或结果数据。
+        """
         with self._connection() as connection:
             connection.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
@@ -70,9 +82,16 @@ class SQLiteStore:
                     report_html TEXT NOT NULL DEFAULT '',
                     report_json TEXT NOT NULL DEFAULT '',
                     log_path TEXT NOT NULL DEFAULT '',
-                    result_json TEXT NOT NULL DEFAULT '{}'
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    terminated_stage TEXT NOT NULL DEFAULT '',
+                    terminate_requested_at TEXT NOT NULL DEFAULT ''
                 )
             """)
+            existing = {row[1] for row in
+                        connection.execute("PRAGMA table_info(tasks)").fetchall()}
+            for column, statement in _MIGRATIONS:
+                if column not in existing:
+                    connection.execute(statement)
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_time "
                                "ON tasks(uploaded_at DESC)")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status "
@@ -128,6 +147,57 @@ class SQLiteStore:
                 "UPDATE tasks SET %s WHERE task_id = ?" % assignments, params)
             return cursor.rowcount > 0
 
+    def _conditional_update(self, task_id: str, condition: str,
+                            fields: Dict[str, Any]) -> bool:
+        """仅在任务当前状态满足条件时原子写入（比较并交换）。
+
+        条件直接拼入 WHERE 子句，与 SET 赋值处于同一条 UPDATE 语句中，
+        由 SQLite 单语句事务保证检查与写入的原子性，并发下只有一方生效。
+        """
+        updates = {key: value for key, value in fields.items() if key in _UPDATABLE}
+        if not updates:
+            return False
+        if "result_json" in updates and not isinstance(updates["result_json"], str):
+            updates["result_json"] = json.dumps(
+                updates["result_json"], ensure_ascii=False, default=str)
+        if "passed" in updates:
+            updates["passed"] = 1 if updates["passed"] else 0
+        assignments = ", ".join("%s = ?" % key for key in updates)
+        params = [updates[key] for key in updates] + [task_id]
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE tasks SET %s WHERE task_id = ? AND %s"
+                % (assignments, condition), params)
+            return cursor.rowcount > 0
+
+    def request_terminate(self, task_id: str, requested_at: str) -> bool:
+        """把 running 任务原子迁移为 terminating；其他状态返回 False。
+
+        已完成（passed/failed/error）或已终止的历史任务永远不会被改写。
+        """
+        return self._conditional_update(
+            task_id, "status = 'running'",
+            {"status": "terminating",
+             "terminate_requested_at": str(requested_at)})
+
+    def complete_task(self, task_id: str, **fields: Any) -> bool:
+        """仅当任务仍处于 running 时写入最终结果。
+
+        若终止请求已先把状态迁移为 terminating，本次写入失败，调用方应
+        改走终止收尾流程，避免覆盖已受理的终止请求。
+        """
+        return self._conditional_update(task_id, "status = 'running'", fields)
+
+    def finalize_termination(self, task_id: str, **fields: Any) -> bool:
+        """仅当任务处于 running/terminating 时原子写入终止结果。
+
+        状态强制为 terminated；已进入终态的任务返回 False，保证并发
+        终止与正常完成竞争时任务状态只被最终写入一次。
+        """
+        fields["status"] = "terminated"
+        return self._conditional_update(
+            task_id, "status IN ('running', 'terminating')", fields)
+
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         """将数据库行转换为含解析后 result 的字典。"""
@@ -155,13 +225,15 @@ class SQLiteStore:
             clauses.append("(task_id LIKE ? OR packet_name LIKE ?)")
             like = "%" + str(query).strip() + "%"
             params.extend([like, like])
-        if status in ("passed", "failed", "running"):
+        if status in ("passed", "failed", "running", "terminated"):
             if status == "passed":
                 clauses.append("status = 'passed'")
             elif status == "failed":
                 clauses.append("status IN ('failed', 'error')")
+            elif status == "terminated":
+                clauses.append("status = 'terminated'")
             else:
-                clauses.append("status = 'running'")
+                clauses.append("status IN ('running', 'terminating')")
         if date_from:
             clauses.append("uploaded_at >= ?")
             params.append(str(date_from) + "T00:00:00")

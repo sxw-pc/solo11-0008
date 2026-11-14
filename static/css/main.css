@@ -228,6 +228,7 @@ td strong { display: block; font-size: 12px; }
 .pill.pass { color: var(--ok); background: var(--ok-bg); }
 .pill.fail { color: var(--bad); background: var(--bad-bg); }
 .pill.running { color: var(--warn); background: #fff4d6; }
+.pill.terminated { color: var(--warn); background: #fff4d6; }
 .empty-state { padding: 42px 20px; text-align: center; color: var(--muted); }
 .empty-state.compact { padding: 18px; }
 .empty-state h1, .empty-state h2 { color: var(--ink); }

@@ -23,6 +23,7 @@
         <option value="passed" {% if filters.status == 'passed' %}selected{% endif %}>通过</option>
         <option value="failed" {% if filters.status == 'failed' %}selected{% endif %}>不通过</option>
         <option value="running" {% if filters.status == 'running' %}selected{% endif %}>运行中</option>
+        <option value="terminated" {% if filters.status == 'terminated' %}selected{% endif %}>已终止</option>
       </select>
     </label>
     <label class="field compact">
@@ -64,6 +65,10 @@
               <span class="pill pass">通过</span>
             {% elif task.status == 'running' %}
               <span class="pill running">运行中</span>
+            {% elif task.status == 'terminating' %}
+              <span class="pill running">终止中</span>
+            {% elif task.status == 'terminated' %}
+              <span class="pill terminated">已终止</span>
             {% else %}
               <span class="pill fail">不通过</span>
             {% endif %}
@@ -73,6 +78,12 @@
             <a class="text-link" href="{{ url_for('task_detail', task_id=task.task_id) }}">详情</a>
             {% if task.report_html %}
               <a class="text-link" href="{{ url_for('download_report', task_id=task.task_id, fmt='html') }}">HTML</a>
+            {% endif %}
+            {% if task.status == 'running' %}
+              <form method="post" action="{{ url_for('terminate_task', task_id=task.task_id) }}"
+                    class="inline-form js-confirm" data-confirm="确认终止该运行中任务？将在当前校验阶段结束后停止。">
+                <button class="text-link danger" type="submit">终止</button>
+              </form>
             {% endif %}
             <form method="post" action="{{ url_for('delete_task', task_id=task.task_id) }}"
                   class="inline-form js-confirm" data-confirm="确认删除该任务及全部报告？">

@@ -2,12 +2,14 @@
 
 - **任务 ID**：{{ report.task.task_id }}
 - **数据包**：{{ report.task.packet_name }}
-- **总体结论**：{{ "通过" if report.overall_passed else "不通过" }}
+- **总体结论**：{% if report.termination %}已终止（部分报告）{% else %}{{ "通过" if report.overall_passed else "不通过" }}{% endif %}
 - **校验项通过率**：{{ report.pass_rate }}%
 - **工具版本**：{{ report.meta.tool_version }}
 - **配置哈希**：{{ report.meta.config_hash }}
 - **生成时间**：{{ report.meta.generated_at }}
-
+{% if report.termination %}
+> **终止说明**：本任务在「{{ report.termination.stage_label }}」阶段被人工终止（终止请求时间：{{ report.termination.requested_at or "未记录" }}）。本报告仅包含终止前已完成的部分校验结果，不可作为准入依据。
+{% endif %}
 ## 任务信息
 
 | 项目 | 内容 |
