@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}批量校验 · 数包闸检{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <p class="eyebrow">BATCH PRIORITY SCHEDULING</p>
+    <h1>批量优先级校验</h1>
+    <p class="muted">一次提交多个数据包，按优先级排队并发执行；全部校验在本机完成，不访问任何外部服务。</p>
+  </div>
+  <a class="btn" href="{{ url_for('index') }}">单包校验</a>
+</section>
+
+<div class="layout">
+  <section class="card form-card">
+    <div class="card-head">
+      <h2>批量提交</h2>
+      <span class="muted">并发 {{ config.batch_max_workers }} · 在途上限 {{ config.batch_queue_limit }}</span>
+    </div>
+    <form method="post" enctype="multipart/form-data" id="batch-form">
+      <label class="field">
+        <span>数据包（可多选）<b>*</b></span>
+        <input type="file" name="packets" accept=".zip,.tar.gz,.tgz" multiple required>
+        <small id="packet-count">每个压缩包根目录必须包含 manifest.yaml。</small>
+      </label>
+
+      <div class="form-grid">
+        <label class="field">
+          <span>整批优先级</span>
+          <select name="priority">
+            <option value="{{ priority.HIGH }}">高 · 紧急入域</option>
+            <option value="{{ priority.NORMAL }}" selected>普通</option>
+            <option value="{{ priority.LOW }}">低 · 可延后</option>
+          </select>
+          <small>高优先级任务将在运行中任务完成当前执行单元后插队，不打断已完成的校验步骤。</small>
+        </label>
+        <label class="field">
+          <span>内置校验方案</span>
+          <select name="preset">
+            <option value="trade">交易域 · 用户/交易/商品/订单</option>
+            <option value="product">商品域 · 商品/订单</option>
+          </select>
+          <small>整批共用同一套契约与血缘规则。</small>
+        </label>
+      </div>
+
+      <details class="advanced">
+        <summary>逐包优先级与自定义契约</summary>
+        <div class="form-grid">
+          <label class="field">
+            <span>逐包优先级（可选）</span>
+            <input type="text" name="priorities" maxlength="200"
+                   placeholder="如 1,5,9（与所选文件顺序一一对应）">
+            <small>逗号分隔的 0-9 数字，越小越优先；数量不足时其余包使用整批优先级。</small>
+          </label>
+          <label class="field">
+            <span>数据契约 YAML</span>
+            <input type="file" name="contract" accept=".yaml,.yml">
+            <small>上传后覆盖内置契约，整批生效。</small>
+          </label>
+          <label class="field">
+            <span>血缘规则 YAML</span>
+            <input type="file" name="lineage" accept=".yaml,.yml">
+            <small>上传后覆盖内置血缘规则，整批生效。</small>
+          </label>
+        </div>
+      </details>
+
+      <div class="actions">
+        <button class="btn primary" type="submit">提交批量校验</button>
+        <span class="muted">异步执行 · 提交后可离开本页，结果在历史任务中归档</span>
+      </div>
+    </form>
+  </section>
+
+  <aside class="card side-card">
+    <h2>调度状态</h2>
+    <dl class="kv">
+      <dt>并发上限</dt><dd>{{ snapshot.max_workers }} 个任务</dd>
+      <dt>在途预估解压</dt>
+      <dd><span id="inflight-bytes">{{ '%.2f'|format(snapshot.inflight_bytes / 1073741824) }}</span>
+        / {{ '%.0f'|format(snapshot.max_inflight_bytes / 1073741824) }} GiB</dd>
+      <dt>排队中</dt><dd><span id="queued-count">{{ snapshot.queued|length }}</span> 个任务</dd>
+      <dt>校验中</dt><dd><span id="running-count">{{ snapshot.running|length }}</span> 个任务</dd>
+    </dl>
+    <ol class="steps">
+      <li><b>01</b><span>优先级排队<small>高优先级在当前任务边界插队</small></span></li>
+      <li><b>02</b><span>资源限流<small>在途解压体积与磁盘余量双重阈值</small></span></li>
+      <li><b>03</b><span>隔离执行<small>独立临时目录、日志与报告</small></span></li>
+      <li><b>04</b><span>自动清理<small>终态即释放暂存，重启自动恢复</small></span></li>
+    </ol>
+    <p class="tip">队列持久化在本地 SQLite；服务重启后未完成的任务自动恢复排队，无需重新提交。</p>
+  </aside>
+</div>
+
+<section class="card table-card">
+  <div class="card-head table-head">
+    <h2>执行队列</h2>
+    <span class="muted">每 3 秒自动刷新</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>任务 ID</th><th>数据包</th><th>优先级</th><th>状态</th><th>提交时间</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="queue-body">
+        {% for job in snapshot.running + snapshot.queued %}
+        <tr>
+          <td class="mono">{{ job.job_id }}</td>
+          <td><strong>{{ job.packet_name }}</strong>
+            <small class="muted">{{ job.packet_size }} B</small></td>
+          <td>{{ job.priority_label }}</td>
+          <td>
+            {% if job.status == 'running' %}<span class="pill running">校验中</span>
+            {% else %}<span class="pill queued">排队中</span>{% endif %}
+          </td>
+          <td class="nowrap">{{ job.created_at.replace('T', ' ') }}</td>
+          <td>—</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="empty-state compact" id="queue-empty" {% if snapshot.running or snapshot.queued %}hidden{% endif %}>
+    <p>当前没有排队或运行中的批量任务。</p>
+  </div>
+</section>
+
+<section class="card table-card">
+  <div class="card-head table-head">
+    <h2>最近完成</h2>
+    <a class="text-link" href="{{ url_for('task_list') }}">查看全部历史任务</a>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>任务 ID</th><th>数据包</th><th>优先级</th><th>结果</th><th>完成时间</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="recent-body">
+        {% for job in snapshot.recent %}
+        <tr>
+          <td class="mono">{{ job.job_id }}</td>
+          <td><strong>{{ job.packet_name }}</strong>
+            {% if job.error %}<small class="muted break">{{ job.error }}</small>{% endif %}</td>
+          <td>{{ job.priority_label }}</td>
+          <td>
+            {% if job.status == 'done' %}<span class="pill pass">通过</span>
+            {% elif job.status == 'failed' %}<span class="pill fail">未通过</span>
+            {% else %}<span class="pill fail">{{ job.status_label }}</span>{% endif %}
+          </td>
+          <td class="nowrap">{{ (job.finished_at or '').replace('T', ' ') }}</td>
+          <td class="row-actions">
+            {% if job.status in ('done', 'failed') %}
+              <a class="text-link" href="{{ url_for('task_detail', task_id=job.task_id) }}">详情</a>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="empty-state compact" id="recent-empty" {% if snapshot.recent %}hidden{% endif %}>
+    <p>暂无已完成的批量任务。</p>
+  </div>
+</section>
+<script src="{{ url_for('static', filename='js/batch.js') }}"></script>
+{% endblock %}

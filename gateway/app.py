@@ -2,9 +2,14 @@
 
 服务默认仅监听 127.0.0.1:5000。上传文件在工作目录的 uploads/tmp 下处理，
 校验结束后删除上传副本与临时配置；仅报告、日志和 SQLite 记录长期保留。
+
+批量校验通过 ``gateway.batch`` 子包实现：批量提交的数据包副本暂存于
+uploads/batch 下的批次目录，由后台调度器按优先级并发执行，任务到达终态
+后自动释放暂存文件；单包同步提交的行为保持不变。
 """
 
 from pathlib import Path
+import atexit
 import secrets
 import shutil
 import tempfile
@@ -15,6 +20,7 @@ from flask import (Flask, abort, flash, redirect, render_template, request,
                    send_file, url_for)
 
 from . import __version__
+from .batch import BatchScheduler, Priority, QueueFullError
 from .config import PROJECT_ROOT, AppConfig, load_config
 from .pipeline import run_validation
 from .report.renderer import build_report_context
@@ -104,6 +110,14 @@ def create_app(config: Optional[AppConfig] = None,
     store = SQLiteStore(config.db_path)
     app.extensions["gateway_config"] = config
     app.extensions["gateway_store"] = store
+    scheduler: Optional[BatchScheduler] = None
+    if config.batch_enabled:
+        scheduler = BatchScheduler(config, store)
+        scheduler.start()
+        app.extensions["gateway_scheduler"] = scheduler
+        # 进程退出时给运行中任务一个执行到任务边界的机会；未完成的
+        # 任务会在下次启动时由持久化队列自动恢复。
+        atexit.register(scheduler.stop)
 
     @app.after_request
     def security_headers(response: Any) -> Any:
@@ -154,6 +168,64 @@ def create_app(config: Optional[AppConfig] = None,
             return redirect(url_for("index"))
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
+
+    @app.route("/batch", methods=["GET", "POST"])
+    def batch() -> Any:
+        """批量校验：一次提交多个数据包并按优先级排队执行。"""
+        if scheduler is None:
+            abort(404)
+        if request.method == "GET":
+            return render_template("batch.html", snapshot=scheduler.snapshot(),
+                                   version=__version__, config=config,
+                                   priority=Priority)
+        files = [item for item in request.files.getlist("packets")
+                 if item is not None and item.filename]
+        if not files:
+            flash("请选择至少一个待校验的 zip 或 tar.gz 数据包", "error")
+            return redirect(url_for("batch"))
+        preset = request.form.get("preset", "trade")
+        contract_file = request.files.get("contract")
+        lineage_file = request.files.get("lineage")
+        batch_priority = Priority.clamp(request.form.get("priority"))
+        # 逐包优先级与文件顺序一一对应；空段或数量不足时回落到整批优先级。
+        per_packet = [Priority.clamp(part) if part.strip() else None
+                      for part in (request.form.get("priorities") or "").split(",")]
+        temp_root = Path(tempfile.mkdtemp(prefix="upload-", dir=str(config.temp_dir)))
+        try:
+            builtin_contract, builtin_lineage = _PRESETS.get(preset, _PRESETS["trade"])
+            contract_path, lineage_path = builtin_contract, builtin_lineage
+            if contract_file is not None and contract_file.filename:
+                contract_path = _save_upload(contract_file, temp_root, ".yaml")
+            if lineage_file is not None and lineage_file.filename:
+                lineage_path = _save_upload(lineage_file, temp_root, ".yaml")
+            items = []
+            for index, packet in enumerate(files):
+                saved = _save_upload(packet, temp_root)
+                per_item = (per_packet[index] if index < len(per_packet)
+                            else None)
+                items.append({"packet_path": saved,
+                              "packet_name": _display_name(packet.filename),
+                              "priority": (per_item if per_item is not None
+                                           else batch_priority)})
+            batch_id = scheduler.submit_batch(
+                items, contract_path=contract_path, lineage_path=lineage_path,
+                move=True)
+            flash("批次 %s 已受理 %d 个数据包，正在按优先级排队校验"
+                  % (batch_id, len(items)), "success")
+        except QueueFullError as exc:
+            flash(str(exc), "error")
+        except Exception as exc:
+            flash("批量提交失败: %s" % exc, "error")
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+        return redirect(url_for("batch"))
+
+    @app.route("/batch/api/status")
+    def batch_status() -> Any:
+        """批量队列实时状态 JSON，供页面轮询，不访问任何外部依赖。"""
+        if scheduler is None:
+            abort(404)
+        return scheduler.snapshot()
 
     @app.route("/tasks")
     def task_list() -> Any:

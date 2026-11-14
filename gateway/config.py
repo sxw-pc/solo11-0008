@@ -49,12 +49,18 @@ class AppConfig:
     )
     allowed_extra_paths: tuple = ()
     log_level: str = "INFO"
+    batch_enabled: bool = True
+    batch_max_workers: int = 2
+    batch_max_inflight_bytes: int = 12 * 1024 ** 3
+    batch_min_free_bytes: int = 2 * 1024 ** 3
+    batch_queue_limit: int = 128
 
     reports_dir: Path = field(init=False)
     uploads_dir: Path = field(init=False)
     temp_dir: Path = field(init=False)
     logs_dir: Path = field(init=False)
     db_path: Path = field(init=False)
+    batch_upload_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
         """规范化路径、校验安全参数并创建运行目录。"""
@@ -71,13 +77,22 @@ class AppConfig:
             raise ValueError("解压大小上限必须为正数")
         if int(self.max_archive_entries) <= 0:
             raise ValueError("压缩包条目上限必须为正数")
+        if not 1 <= int(self.batch_max_workers) <= 8:
+            raise ValueError("批量并发数必须在 1-8 之间")
+        if int(self.batch_max_inflight_bytes) <= 0:
+            raise ValueError("批量在途解压体积上限必须为正数")
+        if int(self.batch_min_free_bytes) < 0:
+            raise ValueError("批量磁盘余量阈值不能为负数")
+        if int(self.batch_queue_limit) <= 0:
+            raise ValueError("批量队列容量上限必须为正数")
         # 即使调用方传入软链接或相对路径，也统一固定在工作目录之下。
         self.reports_dir = self.workspace_dir / "reports"
         self.uploads_dir = self.workspace_dir / "uploads"
         self.temp_dir = self.workspace_dir / "tmp"
         self.logs_dir = self.workspace_dir / "logs"
+        self.batch_upload_dir = self.uploads_dir / "batch"
         for folder in (self.workspace_dir, self.reports_dir, self.uploads_dir,
-                       self.temp_dir, self.logs_dir):
+                       self.temp_dir, self.logs_dir, self.batch_upload_dir):
             folder.mkdir(parents=True, exist_ok=True)
         self.db_path = self.workspace_dir / "gateway.db"
         self.blocked_extensions = tuple(
@@ -127,6 +142,8 @@ class AppConfig:
             "sample_ratio": self.sample_ratio,
             "max_uncompressed_bytes": self.max_uncompressed_bytes,
             "max_compression_ratio": self.max_compression_ratio,
+            "batch_max_workers": self.batch_max_workers,
+            "batch_queue_limit": self.batch_queue_limit,
             "config_hash": self.fingerprint(),
         }
 
