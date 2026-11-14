@@ -129,3 +129,37 @@ def test_sqlite_query_error_branch(tmp_path, config):
     result = read_table(path, "sqlite", config, table_name="weird", sample=False)
     assert result.sqlite_table == "weird"
     assert result.frame.empty or list(result.frame.columns) == ["id"]
+
+
+def test_sqlite_order_is_deterministic(tmp_path, config):
+    """无 ORDER BY 的隐式行序不可依赖，读取器应显式固定顺序。"""
+    path = tmp_path / "ordered.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE t (id TEXT, v INTEGER)")
+    connection.executemany("INSERT INTO t VALUES (?, ?)",
+                           [("r%d" % i, i) for i in (9, 3, 7, 1, 5)])
+    connection.commit()
+    connection.close()
+    first = read_table(path, "sqlite", config, table_name="t", sample=False)
+    second = read_table(path, "sqlite", config, table_name="t", sample=False)
+    assert first.frame["id"].tolist() == second.frame["id"].tolist()
+
+    wor = tmp_path / "without_rowid.sqlite"
+    connection = sqlite3.connect(wor)
+    connection.execute("CREATE TABLE w (id TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID")
+    connection.executemany("INSERT INTO w VALUES (?, ?)",
+                           [("r%d" % i, i) for i in (9, 3, 7, 1, 5)])
+    connection.commit()
+    connection.close()
+    result = read_table(wor, "sqlite", config, table_name="w", sample=False)
+    assert result.frame["id"].tolist() == ["r1", "r3", "r5", "r7", "r9"]
+
+
+def test_sample_rejects_non_integer_seed(tmp_path):
+    """None/字符串等非整数种子会回退全局随机数生成器，必须拒绝。"""
+    from gateway.parser.table_reader import _apply_sample
+    frame = pd.DataFrame({"v": range(100)})
+    for bad in (None, "42", 1.5, True):
+        with pytest.raises(TableReadError):
+            _apply_sample(frame, 0.1, bad)
+    assert len(_apply_sample(frame, 0.1, 42)) == 10

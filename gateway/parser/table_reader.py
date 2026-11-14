@@ -133,7 +133,22 @@ def _read_sqlite(path: Path, table_name: Optional[str]) -> TableData:
     try:
         connection = sqlite3.connect(str(path))
         try:
-            frame = pd.read_sql_query("SELECT * FROM %s" % safe_table, connection)
+            # 显式固定读取顺序，避免依赖无 ORDER BY 时的隐式 rowid 顺序，
+            # 保证同一数据库在任何重建/VACUUM 后抽样行号与样例都可复现。
+            without_rowid = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? "
+                "AND lower(sql) LIKE '%without rowid%'", (table_name,)).fetchone()
+            if without_rowid:
+                pragma = connection.execute(
+                    'PRAGMA table_info(%s)' % safe_table).fetchall()
+                order_cols = [row[1] for row in pragma if row[5]] or \
+                    [row[1] for row in pragma]
+                order_clause = ", ".join('"%s"' % str(col).replace('"', '""')
+                                         for col in order_cols)
+            else:
+                order_clause = "rowid"
+            frame = pd.read_sql_query(
+                "SELECT * FROM %s ORDER BY %s" % (safe_table, order_clause), connection)
         finally:
             connection.close()
     except (sqlite3.DatabaseError, pd.errors.DatabaseError) as exc:
@@ -147,9 +162,15 @@ def _read_sqlite(path: Path, table_name: Optional[str]) -> TableData:
 
 
 def _apply_sample(frame: pd.DataFrame, ratio: float, seed: int) -> pd.DataFrame:
-    """按比例执行可复现的均匀随机抽样，至少保留一行。"""
+    """按比例执行可复现的均匀随机抽样，至少保留一行。
+
+    ``seed`` 必须是确定的整数；为 None 时 pandas 会回退到进程级全局随机数
+    生成器，使同一数据包的抽样结果在多次运行间不可复现，因此这里拒绝该输入。
+    """
     if ratio >= 1.0 or frame.empty:
         return frame
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise TableReadError("抽样随机种子必须为整数，不能为 null 或其他类型")
     count = max(1, int(round(len(frame) * ratio)))
     if count >= len(frame):
         return frame

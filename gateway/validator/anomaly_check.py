@@ -17,6 +17,36 @@ from .custom_rules import get_custom_rule
 _BUILTIN_RULES = {"range", "regex", "date", "null_rate", "duplicate_rate", "custom"}
 
 
+def _null_mask(series: pd.Series) -> pd.Series:
+    """返回与 series 同索引的空值布尔掩码。
+
+    空值口径与 Schema 校验及契约手册一致：None/NaN 以及仅含空白的字符串
+    都计为空，保证字段级统计与 null_rate 规则使用同一套口径、结果可复现。
+    """
+    return series.map(_is_null).fillna(True).astype(bool)
+
+
+def _resolve_field(columns: List[str], field: str,
+                   aliases: Dict[str, Any]) -> Optional[str]:
+    """把契约规范字段名解析为表中实际存在的列名。
+
+    优先使用同名列；否则按 ``aliases`` 中“规范字段 -> 上游候选列名”的映射
+    解析唯一命中的别名。未配置别名或无候选命中时返回 None，由调用方按
+    ``field_missing`` 处理。与 Schema 校验共用同一份别名语义，避免只含别名
+    列的合法表在异常抽检阶段被误判为字段缺失。
+    """
+    if field in columns:
+        return field
+    candidates = aliases.get(field)
+    if candidates is None:
+        return None
+    candidate_list = [candidates] if isinstance(candidates, str) else list(candidates)
+    matches = [str(item) for item in candidate_list if str(item) in columns]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def _is_null(value: Any) -> bool:
     """判断标量是否为空，字符串空白按空值处理。"""
     if value is None:
@@ -140,7 +170,8 @@ def _run_rule(series: pd.Series, rule: Dict[str, Any], table: str, field: str,
     if rule_type not in _BUILTIN_RULES:
         return {"rule": rule_type, "passed": False, "error": "未知规则类型", "violations": 0}
     total = len(series)
-    non_null_count = int(series.notna().sum())
+    nulls = _null_mask(series)
+    non_null_count = int((~nulls).sum())
     violations = 0
     try:
         if rule_type == "range" or rule_type == "regex" or rule_type == "date":
@@ -158,22 +189,22 @@ def _run_rule(series: pd.Series, rule: Dict[str, Any], table: str, field: str,
                     "threshold": max_rate, "max_rate": max_rate}
         if rule_type == "null_rate":
             threshold = float(rule.get("max", rule.get("max_rate", 0.0)))
-            null_count = total - non_null_count
+            null_count = int(nulls.sum())
             rate = null_count / total if total else 0.0
             if rate > threshold:
-                for index, value in series.items():
-                    if _is_null(value):
-                        _add_sample(samples, table, field, rule_type, index, value,
-                                    offset, "空值率 %.2f%% 超过阈值 %.2f%%"
-                                    % (rate * 100, threshold * 100))
-                        if len(samples) >= 20:
-                            break
+                for index in nulls[nulls].index:
+                    _add_sample(samples, table, field, rule_type, index,
+                                series.loc[index], offset,
+                                "空值率 %.2f%% 超过阈值 %.2f%%"
+                                % (rate * 100, threshold * 100))
+                    if len(samples) >= 20:
+                        break
             return {"rule": rule_type, "passed": rate <= threshold,
                     "violations": null_count, "checked": total,
                     "rate": round(rate, 4), "threshold": threshold}
         if rule_type == "duplicate_rate":
             threshold = float(rule.get("max", rule.get("max_rate", 0.0)))
-            valid = series[series.notna()].astype(str).str.strip()
+            valid = series[~nulls].astype(str).str.strip()
             valid = valid[valid != ""]
             counts = valid.value_counts()
             duplicate_mask = valid.isin(counts[counts > 1].index)
@@ -214,10 +245,17 @@ def _check_field(table: str, field: str, series: pd.Series, rules: List[Any],
         result = _run_rule(series, rule, table, field, offset, samples)
         rule_results.append(result)
     total = len(series)
-    null_count = int(series.isna().sum())
-    valid = series[series.notna()].astype(str).str.strip()
+    nulls = _null_mask(series)
+    null_count = int(nulls.sum())
+    valid = series[~nulls].astype(str).str.strip()
     valid = valid[valid != ""]
-    duplicate_rate = (1.0 - valid.nunique() / len(valid)) if len(valid) else 0.0
+    # 与 duplicate_rate 规则及契约手册保持同一口径：重复出现的行数 / 非空行数。
+    if len(valid):
+        counts = valid.value_counts()
+        duplicate_row_count = int(valid.isin(counts[counts > 1].index).sum())
+        duplicate_rate = duplicate_row_count / len(valid)
+    else:
+        duplicate_rate = 0.0
     failed_rules = [item for item in rule_results if not item.get("passed")]
     anomaly_count = sum(item.get("violations", 0) for item in rule_results)
     return {
@@ -244,6 +282,7 @@ def validate_anomalies(tables: Dict[str, TableData],
     rule_config = config.get("anomaly_rules", config.get("checks", {}))
     if not isinstance(rule_config, dict):
         rule_config = {}
+    contract_tables = config.get("tables", {}) if isinstance(config, dict) else {}
     fields = []
     samples: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
@@ -255,15 +294,21 @@ def validate_anomalies(tables: Dict[str, TableData],
         if not isinstance(table_rules, dict):
             errors.append({"code": "rule_invalid", "message": "表 %s 规则必须为映射" % table_name})
             continue
+        table_rule = contract_tables.get(str(table_name), {})
+        aliases = table_rule.get("aliases") if isinstance(table_rule, dict) else {}
+        if not isinstance(aliases, dict):
+            aliases = {}
+        columns = [str(column) for column in table_data.frame.columns]
         for field, rules in table_rules.items():
-            if field not in table_data.frame.columns:
+            actual_field = _resolve_field(columns, str(field), aliases)
+            if actual_field is None:
                 errors.append({"code": "field_missing", "message": "异常规则字段不存在: %s.%s"
                                % (table_name, field)})
                 continue
             if not isinstance(rules, list):
                 rules = [rules]
             fields.append(_check_field(str(table_name), str(field),
-                                       table_data.frame[field], rules,
+                                       table_data.frame[actual_field], rules,
                                        table_data.row_offset, samples))
     failed_fields = [item for item in fields if not item["passed"]]
     passed = not failed_fields and not errors

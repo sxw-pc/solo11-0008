@@ -67,6 +67,10 @@ class AppConfig:
             raise ValueError("端口必须在 1-65535 之间")
         if not 0 < float(self.sample_ratio) <= 1:
             raise ValueError("sample_ratio 必须位于 (0, 1]")
+        # 种子必须是确定的整数：None 会让 pandas 抽样回退到全局随机数生成器，
+        # 导致同一数据包多次运行结果不可复现。bool 是 int 子类，需显式排除。
+        if not isinstance(self.random_seed, int) or isinstance(self.random_seed, bool):
+            raise ValueError("random_seed 必须为整数，不能为 null 或其他类型")
         if int(self.max_uncompressed_bytes) <= 0:
             raise ValueError("解压大小上限必须为正数")
         if int(self.max_archive_entries) <= 0:

@@ -61,7 +61,7 @@ def test_null_and_duplicate_rates(make_table):
     assert not null["passed"]
     duplicate = validate_anomalies(
         {"t": table}, _rules("t", "value", [{"rule": "duplicate_rate", "max": 0.1}]))
-    assert duplicate["fields"][0]["duplicate_rate"] == 0.3333
+    assert duplicate["fields"][0]["duplicate_rate"] == 0.6667
     assert not duplicate["passed"]
 
 
@@ -198,3 +198,64 @@ def test_non_empty_custom_rule(make_table):
     result = validate_anomalies(
         {"t": table}, _rules("t", "value", [{"rule": "custom", "function": "non_empty"}]))
     assert result["fields"][0]["rules"][0]["violations"] == 1
+
+
+def test_alias_field_resolved_in_anomaly_check(make_table):
+    """异常规则按规范字段书写时，应解析到唯一别名列，不报 field_missing。"""
+    table = make_table("t", [{"uid": "U0001"}, {"uid": "U0002"}])
+    contract = {
+        "tables": {"t": {"aliases": {"user_id": ["uid"]}}},
+        "anomaly_rules": {"t": {"user_id": [
+            {"rule": "null_rate", "max": 0.0},
+            {"rule": "duplicate_rate", "max": 0.0}]}},
+    }
+    result = validate_anomalies({"t": table}, contract)
+    assert result["passed"]
+    assert result["errors"] == []
+    assert result["fields"][0]["field"] == "user_id"
+
+
+def test_alias_null_rate_violation_is_detected(make_table):
+    """别名列上的空值率超标必须被规则拦截，而非跳过。"""
+    table = make_table("t", [{"uid": None}, {"uid": "U1"}, {"uid": "U2"}])
+    contract = {
+        "tables": {"t": {"aliases": {"user_id": ["uid"]}}},
+        "anomaly_rules": {"t": {"user_id": [{"rule": "null_rate", "max": 0.0}]}},
+    }
+    result = validate_anomalies({"t": table}, contract)
+    assert not result["passed"]
+    assert result["fields"][0]["rules"][0]["violations"] == 1
+
+
+def test_ambiguous_alias_treated_as_missing(make_table):
+    """多个别名同时命中时不擅自选择，按字段缺失交给 Schema 冲突校验拦截。"""
+    table = make_table("t", [{"a": "x", "b": "y"}])
+    contract = {
+        "tables": {"t": {"aliases": {"id": ["a", "b"]}}},
+        "anomaly_rules": {"t": {"id": [{"rule": "null_rate", "max": 0.0}]}},
+    }
+    result = validate_anomalies({"t": table}, contract)
+    assert not result["passed"]
+    assert result["errors"][0]["code"] == "field_missing"
+
+
+def test_whitespace_string_counted_as_null(make_table):
+    """手册要求空白字符串计为空，字段级与规则级口径必须一致。"""
+    table = make_table("t", [{"v": "   "}, {"v": ""}, {"v": None},
+                             {"v": "x"}, {"v": "y"}])
+    result = validate_anomalies(
+        {"t": table}, _rules("t", "v", [{"rule": "null_rate", "max": 0.5}]))
+    field = result["fields"][0]
+    assert field["null_count"] == 3
+    assert field["null_rate"] == 0.6
+    assert field["rules"][0]["rate"] == 0.6
+    assert not field["passed"]
+
+
+def test_field_level_duplicate_rate_matches_rule(make_table):
+    """字段汇总重复率与 duplicate_rate 规则使用同一口径（重复行数/非空行数）。"""
+    table = make_table("t", [{"v": None}, {"v": "a"}, {"v": "a"}, {"v": "b"}])
+    result = validate_anomalies(
+        {"t": table}, _rules("t", "v", [{"rule": "duplicate_rate", "max": 0.1}]))
+    field = result["fields"][0]
+    assert field["duplicate_rate"] == field["rules"][0]["rate"] == 0.6667

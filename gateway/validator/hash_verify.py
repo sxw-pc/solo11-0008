@@ -2,12 +2,25 @@
 
 from fnmatch import fnmatch
 from hashlib import md5, sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 from ..config import AppConfig
 
 MANIFEST_NAME = "manifest.yaml"
+
+
+def _normalize_relpath(value: Any) -> str:
+    """把 manifest 中的相对路径归一化为压缩包内 POSIX 形式。
+
+    统一反斜杠、折叠 ``./``、重复斜杠与空段，使 ``./data/users.csv``、
+    ``data//users.csv`` 与 ``data/./users.csv`` 都归一到 ``data/users.csv``。
+    与归档解压时的 :func:`_normalize_member` 口径保持一致，但不在此抛安全
+    异常——越界路径在解压阶段已被拒绝，这里仅做字符串归一。
+    """
+    text = str(value).replace("\\", "/")
+    parts = [part for part in PurePosixPath(text).parts if part not in ("", ".")]
+    return "/".join(parts)
 
 
 def compute_file_hashes(path: Path) -> Dict[str, str]:
@@ -108,21 +121,41 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
         统一格式的校验结果字典，含 errors 与 checked_files。
     """
     extract_root = Path(extract_root)
-    declared = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
-    declared_norm = {str(key).replace("\\", "/").lstrip("./"): value
-                     for key, value in declared.items()}
+    raw_declared = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
     actual_files = []
     for path in sorted(extract_root.rglob("*")):
         if path.is_file():
             relative = path.relative_to(extract_root).as_posix()
             actual_files.append((relative, path))
     actual_names = {relative for relative, _ in actual_files}
+    # 同时提供精确与小写两个索引，兼容 manifest 与磁盘大小写不一致的场景。
+    actual_lower = {name.lower(): name for name in actual_names}
     errors: List[Dict[str, Any]] = []
+
+    def _resolve_actual(relative: str) -> Optional[str]:
+        """把归一化声明路径解析为磁盘上的实际相对路径，大小写不敏感。"""
+        if relative in actual_names:
+            return relative
+        return actual_lower.get(relative.lower())
+
+    declared_norm: Dict[str, Dict[str, Any]] = {}
+    for key, value in raw_declared.items():
+        normalized = _normalize_relpath(key)
+        if not normalized:
+            continue
+        if normalized in declared_norm:
+            errors.append({
+                "code": "duplicate_declaration", "path": normalized,
+                "message": "manifest 存在指向同一文件的重复声明: %s" % key,
+            })
+            continue
+        declared_norm[normalized] = value
     checked = 0
     for relative, value in declared_norm.items():
         if relative == MANIFEST_NAME:
             continue
-        if relative not in actual_names:
+        actual_relative = _resolve_actual(relative)
+        if actual_relative is None:
             errors.append({
                 "code": "missing_file", "path": relative,
                 "message": "manifest 声明的文件缺失",
@@ -142,7 +175,7 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
                 "message": "manifest 未声明 MD5 或 SHA256",
             })
             continue
-        computed = compute_file_hashes(extract_root / relative)
+        computed = compute_file_hashes(extract_root / actual_relative)
         checked += 1
         if expected_md5 and computed["md5"].lower() != str(expected_md5).lower():
             errors.append({
@@ -156,6 +189,7 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
                 "expected": str(expected_sha), "actual": computed["sha256"],
                 "message": "文件 SHA256 哈希不一致，疑似被篡改",
             })
+    declared_lower = {name.lower() for name in declared_norm}
     for relative, _ in actual_files:
         if relative == MANIFEST_NAME:
             continue
@@ -164,7 +198,7 @@ def verify_hashes(extract_root: Path, manifest: Dict[str, Any], config: AppConfi
                 "code": "dangerous_file", "path": relative,
                 "message": "检测到高危可执行或脚本文件",
             })
-        if relative not in declared_norm and not _allowed_extra(relative, config):
+        if relative.lower() not in declared_lower and not _allowed_extra(relative, config):
             errors.append({
                 "code": "redundant_file", "path": relative,
                 "message": "检测到 manifest 未声明的冗余文件",
